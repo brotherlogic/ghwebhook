@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package ghwebhook.v1;
+
+option go_package = "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1";
+
+// RegistrationService handles service check-ins.
+service RegistrationService {
+    // Register a service for a specific repository.
+    rpc Register(RegistrationRequest) returns (RegistrationResponse);
+}
+
+// WebhookHandler is the service implemented by clients to receive webhooks.
+service WebhookHandler {
+    // ReceiveWebhook is called by the proxy when a webhook is received.
+    rpc ReceiveWebhook(WebhookEvent) returns (WebhookResponse);
+}
+
+message RegistrationRequest {
+    string repo_full_name = 1; // e.g., "owner/repo"
+    string service_address = 2; // e.g., "service.namespace.svc:50051"
+}
+
+message RegistrationResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message WebhookResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message WebhookEvent {
+    EventHeader header = 1;
+    oneof payload {
+        PullRequestEvent pull_request = 2;
+        IssueEvent issue = 3;
+    }
+}
+
+message EventHeader {
+    string event_type = 1; // e.g., "pull_request"
+    int64 received_at_ms = 2; // Proxy timestamp
+}
+
+message PullRequestEvent {
+    string action = 1;
+    int32 number = 2;
+    string title = 3;
+    string body = 4;
+    User user = 5;
+    Repository repository = 6;
+}
+
+message IssueEvent {
+    string action = 1;
+    int32 number = 2;
+    string title = 3;
+    string body = 4;
+    User user = 5;
+    Repository repository = 6;
+}
+
+message User {
+    string login = 1;
+}
+
+message Repository {
+    string full_name = 1;
+}
