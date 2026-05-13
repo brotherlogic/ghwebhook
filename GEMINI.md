@@ -8,7 +8,8 @@ Every feature or bug fix MUST follow this sequence:
 1.  **Issue Research & Alignment:** Before implementation, the agent and user must reach a shared understanding of requirements. This conclusion MUST be posted as a comment on the GitHub issue.
 2.  **Implementation Plan:** A detailed implementation plan MUST be posted as a comment on the GitHub issue after alignment.
 3.  **TDD Execution:** Implementation work MUST NOT start until the two documents above are posted.
-4.  **Completion:** Every issue is closed by a Pull Request (PR) that references the issue.
+4. **Completion:** Every issue is closed by a Pull Request (PR) from a **feature branch** to \`main\`. All code changes MUST be pushed to a feature branch; direct pushes to \`main\` are prohibited.
+
 
 ## 2. Coding Standards
 
