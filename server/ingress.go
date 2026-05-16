@@ -1,13 +1,16 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
@@ -65,11 +68,40 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mapping logic (to be expanded in Issue #4, but we can verify it here)
 	eventType := r.Header.Get("X-GitHub-Event")
-	_ = s.mapToProto(ghPayload, eventType)
+	event := s.mapToProto(ghPayload, eventType)
+
+	if event.Payload != nil {
+		s.routeEvent(r.Context(), event, ghPayload.Repository.FullName)
+	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo string) {
+	regs, err := s.getRegistrations(ctx, repo)
+	if err != nil {
+		log.Printf("Failed to get registrations for %s: %v", repo, err)
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, reg := range regs {
+		wg.Add(1)
+		go func(address string) {
+			defer wg.Done()
+			client, err := s.getClient(address)
+			if err != nil {
+				log.Printf("Failed to get client for %s: %v", address, err)
+				return
+			}
+			_, err = client.ReceiveWebhook(ctx, event)
+			if err != nil {
+				log.Printf("Failed to deliver webhook to %s: %v", address, err)
+			}
+		}(reg.ServiceAddress)
+	}
+	wg.Wait()
 }
 
 func (s *Server) validateSignature(payload []byte, signature string) bool {

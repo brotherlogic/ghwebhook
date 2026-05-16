@@ -3,16 +3,29 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Server struct {
 	pstore pstore_client.PStoreClient
+	
+	connLock sync.Mutex
+	conns    map[string]pb.WebhookHandlerClient
+}
+
+func NewServer(pstore pstore_client.PStoreClient) *Server {
+	return &Server{
+		pstore: pstore,
+		conns:  make(map[string]pb.WebhookHandlerClient),
+	}
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb.RegistrationResponse, error) {
@@ -58,4 +71,23 @@ func (s *Server) getRegistrations(ctx context.Context, repo string) ([]*pb.Regis
 	}
 
 	return registrations, nil
+}
+
+func (s *Server) getClient(address string) (pb.WebhookHandlerClient, error) {
+	s.connLock.Lock()
+	defer s.connLock.Unlock()
+
+	if client, ok := s.conns[address]; ok {
+		return client, nil
+	}
+
+	// We use insecure for now as this is internal cluster traffic
+	conn, err := grpc.Dial(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+
+	client := pb.NewWebhookHandlerClient(conn)
+	s.conns[address] = client
+	return client, nil
 }

@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+
+	pstore_client "github.com/brotherlogic/pstore/client"
 )
 
 func TestWebhookIngress_NoSignature(t *testing.T) {
-	s := &Server{}
+	s := NewServer(pstore_client.GetTestClient())
 	req, _ := http.NewRequest("POST", "/webhook", bytes.NewBuffer([]byte("{}")))
 	rr := httptest.NewRecorder()
 
@@ -28,7 +30,7 @@ func TestWebhookIngress_ValidSignature(t *testing.T) {
 	os.Setenv("GH_WEBHOOK_SECRET", secret)
 	defer os.Unsetenv("GH_WEBHOOK_SECRET")
 
-	s := &Server{}
+	s := NewServer(pstore_client.GetTestClient())
 	payload := []byte(`{"action": "opened", "number": 123, "pull_request": {"title": "Test PR", "body": "Body text", "user": {"login": "user1"}}, "repository": {"full_name": "repo/test"}}`)
 	
 	h := hmac.New(sha256.New, []byte(secret))
@@ -45,9 +47,6 @@ func TestWebhookIngress_ValidSignature(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
 	}
-
-	// We'll need a way to verify that the parsing happened correctly.
-	// For now, we are just checking the status code.
 }
 
 func TestWebhookIngress_InvalidJSON(t *testing.T) {
@@ -55,7 +54,7 @@ func TestWebhookIngress_InvalidJSON(t *testing.T) {
 	os.Setenv("GH_WEBHOOK_SECRET", secret)
 	defer os.Unsetenv("GH_WEBHOOK_SECRET")
 
-	s := &Server{}
+	s := NewServer(pstore_client.GetTestClient())
 	payload := []byte(`{invalid-json}`)
 	
 	h := hmac.New(sha256.New, []byte(secret))

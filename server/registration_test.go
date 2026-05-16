@@ -13,9 +13,7 @@ import (
 
 func TestRegister(t *testing.T) {
 	// Initialize in-memory pstore client
-	s := &Server{
-		pstore: pstore_client.GetTestClient(),
-	}
+	s := NewServer(pstore_client.GetTestClient())
 
 	req := &pb.RegistrationRequest{
 		RepoFullName:   "brotherlogic/ghwebhook",
@@ -55,9 +53,7 @@ func TestRegister(t *testing.T) {
 }
 
 func TestGetRegistrations(t *testing.T) {
-	s := &Server{
-		pstore: pstore_client.GetTestClient(),
-	}
+	s := NewServer(pstore_client.GetTestClient())
 
 	repo := "brotherlogic/ghwebhook"
 	services := []string{"localhost:50051", "localhost:50052"}
