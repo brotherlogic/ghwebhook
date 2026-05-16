@@ -16,6 +16,7 @@ import (
 )
 
 type Server struct {
+	pb.UnimplementedRegistrationServiceServer
 	pstore pstore_client.PStoreClient
 	
 	connLock sync.Mutex
