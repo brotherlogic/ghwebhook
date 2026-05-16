@@ -47,6 +47,12 @@ type githubRepo struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/healthz" {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "OK")
+		return
+	}
+
 	if r.URL.Path != "/webhook" {
 		w.WriteHeader(http.StatusNotFound)
 		return
