@@ -15,4 +15,4 @@ jobs:
         run: |
           gh pr create --base main --head ${{ github.ref_name }} --title "PR for ${{ github.ref_name }}" --body "Automated PR created from push to ${{ github.ref_name }}." || echo "PR already exists"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
