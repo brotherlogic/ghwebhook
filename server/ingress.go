@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	pstore_pb "github.com/brotherlogic/pstore/proto"
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 )
 
@@ -90,14 +92,28 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 		wg.Add(1)
 		go func(address string) {
 			defer wg.Done()
-			client, err := s.getClient(address)
+			err := s.deliverWithRetry(ctx, event, address)
+			key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, address)
+			
 			if err != nil {
-				log.Printf("Failed to get client for %s: %v", address, err)
-				return
-			}
-			_, err = client.ReceiveWebhook(ctx, event)
-			if err != nil {
-				log.Printf("Failed to deliver webhook to %s: %v", address, err)
+				log.Printf("Failed to deliver webhook to %s after retries: %v", address, err)
+				s.strikeLock.Lock()
+				s.strikes[key]++
+				count := s.strikes[key]
+				s.strikeLock.Unlock()
+
+				if count >= 3 {
+					log.Printf("Service %s reached 3 strikes, removing registration", address)
+					_, deleteErr := s.pstore.Delete(ctx, &pstore_pb.DeleteRequest{Key: key})
+					if deleteErr != nil {
+						log.Printf("Failed to delete registration for %s: %v", address, deleteErr)
+					}
+				}
+			} else {
+				// Reset strikes on success
+				s.strikeLock.Lock()
+				delete(s.strikes, key)
+				s.strikeLock.Unlock()
 			}
 		}(reg.ServiceAddress)
 	}

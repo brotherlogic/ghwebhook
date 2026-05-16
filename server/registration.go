@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
@@ -19,12 +20,20 @@ type Server struct {
 	
 	connLock sync.Mutex
 	conns    map[string]pb.WebhookHandlerClient
+
+	strikeLock sync.Mutex
+	strikes    map[string]int
+	
+	// Configurable for testing
+	backoffs []time.Duration
 }
 
 func NewServer(pstore pstore_client.PStoreClient) *Server {
 	return &Server{
-		pstore: pstore,
-		conns:  make(map[string]pb.WebhookHandlerClient),
+		pstore:   pstore,
+		conns:    make(map[string]pb.WebhookHandlerClient),
+		strikes:  make(map[string]int),
+		backoffs: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 60 * time.Second},
 	}
 }
 
@@ -43,6 +52,11 @@ func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb
 	if err != nil {
 		return &pb.RegistrationResponse{Success: false, Message: err.Error()}, nil
 	}
+
+	// Reset strikes on successful re-registration
+	s.strikeLock.Lock()
+	delete(s.strikes, key)
+	s.strikeLock.Unlock()
 
 	return &pb.RegistrationResponse{Success: true}, nil
 }
@@ -90,4 +104,30 @@ func (s *Server) getClient(address string) (pb.WebhookHandlerClient, error) {
 	client := pb.NewWebhookHandlerClient(conn)
 	s.conns[address] = client
 	return client, nil
+}
+
+func (s *Server) deliverWithRetry(ctx context.Context, event *pb.WebhookEvent, address string) error {
+	client, err := s.getClient(address)
+	if err != nil {
+		return err
+	}
+
+	var lastErr error
+	for i, backoff := range s.backoffs {
+		_, lastErr = client.ReceiveWebhook(ctx, event)
+		if lastErr == nil {
+			return nil
+		}
+		
+		// Don't sleep after the last attempt
+		if i < len(s.backoffs)-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+	}
+	
+	return lastErr
 }
