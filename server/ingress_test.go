@@ -13,6 +13,21 @@ import (
 	pstore_client "github.com/brotherlogic/pstore/client"
 )
 
+func TestHealthz(t *testing.T) {
+	s := NewServer(pstore_client.GetTestClient())
+	req, _ := http.NewRequest("GET", "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for /healthz, got %d", rr.Code)
+	}
+	if rr.Body.String() != "OK" {
+		t.Errorf("expected 'OK' body, got %s", rr.Body.String())
+	}
+}
+
 func TestWebhookIngress_NoSignature(t *testing.T) {
 	s := NewServer(pstore_client.GetTestClient())
 	req, _ := http.NewRequest("POST", "/webhook", bytes.NewBuffer([]byte("{}")))
