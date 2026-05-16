@@ -6,13 +6,29 @@ on:
       - opened
       - reopened
       - synchronize
+  status:
+  check_suite:
+    types:
+      - completed
 
 jobs:
   enable-auto-merge:
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge
-        run: gh pr merge --auto --squash "$PR_URL"
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            PR_URL="${{ github.event.pull_request.html_url }}"
+          else
+            # For status/check_suite events, we need to find the associated PRs
+            # This handles both cases where the commit is in one or more PRs
+            PR_URL=$(gh pr list --head "${{ github.sha }}" --format json --jq '.[0].url')
+          fi
+          
+          if [ -n "$PR_URL" ]; then
+            gh pr merge --auto --squash "$PR_URL"
+          else
+            echo "No associated PR found for this event."
+          fi
         env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
