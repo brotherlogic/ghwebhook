@@ -31,4 +31,4 @@ jobs:
             echo "No associated PR found for this event."
           fi
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
