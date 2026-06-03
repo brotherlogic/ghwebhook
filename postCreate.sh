@@ -28,5 +28,8 @@ EOF
 grep -q "tmux attach-session" ~/.zshrc || echo "$TMUX_BLOCK" >> ~/.zshrc
 grep -q "tmux attach-session" ~/.bashrc || echo "$TMUX_BLOCK" >> ~/.bashrc
 
+# Install antigravity
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+
 # Ensure the session is created
 /workspaces/ghwebhook/start-tmux.sh
