@@ -22,7 +22,7 @@ jobs:
           else
             # For status/check_suite events, we need to find the associated PRs
             # This handles both cases where the commit is in one or more PRs
-            PR_URL=$(gh pr list --head "${{ github.sha }}" --format json --jq '.[0].url')
+            PR_URL=$(gh pr list --head "${{ github.sha }}" --json url --jq '.[0].url')
           fi
           
           if [ -n "$PR_URL" ]; then
@@ -31,4 +31,4 @@ jobs:
             echo "No associated PR found for this event."
           fi
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
