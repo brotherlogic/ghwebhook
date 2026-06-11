@@ -16,19 +16,23 @@ When an issue is labeled, refer to the corresponding workflow document under `.a
 
 1. **Requirements gathering**
    - **Label**: `seraphine-needs-requirements` (or variant `seraphine-need-requirements`)
-   - **Workflow Guideline**: [seraphine-needs-requirements.md](file:///workspaces/seraphine/.agent/workflows/seraphine-needs-requirements.md)
+   - **Workflow Guideline**: [seraphine-needs-requirements.md](file:///workspaces/ghwebhook/.agent/workflows/seraphine-needs-requirements.md)
 
 2. **Technical implementation plan formulation**
    - **Label**: `seraphine-needs-implementation-plan`
-   - **Workflow Guideline**: [seraphine-needs-implementation-plan.md](file:///workspaces/seraphine/.agent/workflows/seraphine-needs-implementation-plan.md)
+   - **Workflow Guideline**: [seraphine-needs-implementation-plan.md](file:///workspaces/ghwebhook/.agent/workflows/seraphine-needs-implementation-plan.md)
 
 3. **Issue breakdown**
    - **Label**: `seraphine-break-down-issue`
-   - **Workflow Guideline**: [seraphine-break-down-issue.md](file:///workspaces/seraphine/.agent/workflows/seraphine-break-down-issue.md)
+   - **Workflow Guideline**: [seraphine-break-down-issue.md](file:///workspaces/ghwebhook/.agent/workflows/seraphine-break-down-issue.md)
 
 4. **Component implementation**
    - **Label**: `seraphine-ready-to-implement`
-   - **Workflow Guideline**: [seraphine-ready-to-implement.md](file:///workspaces/seraphine/.agent/workflows/seraphine-ready-to-implement.md)
+   - **Workflow Guideline**: [seraphine-ready-to-implement.md](file:///workspaces/ghwebhook/.agent/workflows/seraphine-ready-to-implement.md)
+
+5. **Bug triage and resolution**
+   - **Label**: `seraphine-bug`
+   - **Workflow Guideline**: [seraphine-bug.md](file:///workspaces/ghwebhook/.agent/workflows/seraphine-bug.md)
 
 ---
 
@@ -42,3 +46,5 @@ When an issue is labeled, refer to the corresponding workflow document under `.a
 | **Implementation Plan Approved** | *None* | **Implementation Plan:** Label removed (remains Open).<br>**Breakdown Sub-Issue:** `[Breakdown] <Title>` labeled with `seraphine-break-down-issue` |
 | **Issue Breakdown** | *None* | **Breakdown Issue:** `seraphine-break-down-issue` removed (remains Open).<br>**Child Sub-Issues:** `[Sub-Issue] <Action>` labeled with `seraphine-ready-to-implement` |
 | **Implementation** | *None* | **Breakdown Issue:** Closed when all child sub-issues are closed (cascading to close Implementation Plan and Parent issues).<br>**Child Sub-Issues:** Labeled with `seraphine-ready-to-implement`. Closed programmatically via PR submission. |
+| **Bug Triage (Simple)** | `seraphine-bug` | *None (Direct fix implemented and PR submitted)* |
+| **Bug Triage (Complex/Failed)** | `seraphine-bug` (Removed) | New issue labeled with `seraphine-needs-requirements` to initiate requirements gathering |
