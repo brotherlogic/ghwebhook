@@ -64,25 +64,34 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	eventType := r.Header.Get("X-GitHub-Event")
+	metricEventType := eventType
+	if eventType != "pull_request" && eventType != "issue" {
+		log.Printf("Received event type other than pull_request or issue: %q", eventType)
+		metricEventType = "unknown"
+	}
+
 	signature := r.Header.Get("X-Hub-Signature-256")
 	if !s.validateSignature(payload, signature) {
+		IncomingEventsTotal.WithLabelValues(metricEventType, "401").Inc()
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	var ghPayload githubPayload
 	if err := json.Unmarshal(payload, &ghPayload); err != nil {
+		IncomingEventsTotal.WithLabelValues(metricEventType, "400").Inc()
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	eventType := r.Header.Get("X-GitHub-Event")
 	event := s.mapToProto(ghPayload, eventType)
 
 	if event.Payload != nil {
 		s.routeEvent(r.Context(), event, ghPayload.Repository.FullName)
 	}
 
+	IncomingEventsTotal.WithLabelValues(metricEventType, "200").Inc()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -101,8 +110,15 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 			err := s.deliverWithRetry(ctx, event, address)
 			key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, address)
 
+			outgoingMetricEventType := event.Header.EventType
+			if outgoingMetricEventType != "pull_request" && outgoingMetricEventType != "issue" {
+				outgoingMetricEventType = "unknown"
+			}
+
 			if err != nil {
 				log.Printf("Failed to deliver webhook to %s after retries: %v", address, err)
+				OutgoingEventsTotal.WithLabelValues(outgoingMetricEventType, address, "failure").Inc()
+
 				s.strikeLock.Lock()
 				s.strikes[key]++
 				count := s.strikes[key]
@@ -116,6 +132,8 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 					}
 				}
 			} else {
+				OutgoingEventsTotal.WithLabelValues(outgoingMetricEventType, address, "success").Inc()
+
 				// Reset strikes on success
 				s.strikeLock.Lock()
 				delete(s.strikes, key)
