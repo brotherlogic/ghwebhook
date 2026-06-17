@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
-	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	"google.golang.org/protobuf/proto"
 )
 

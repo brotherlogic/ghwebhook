@@ -47,7 +47,7 @@ func TestWebhookIngress_ValidSignature(t *testing.T) {
 
 	s := NewServer(pstore_client.GetTestClient())
 	payload := []byte(`{"action": "opened", "number": 123, "pull_request": {"title": "Test PR", "body": "Body text", "user": {"login": "user1"}}, "repository": {"full_name": "repo/test"}}`)
-	
+
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write(payload)
 	signature := "sha256=" + hex.EncodeToString(h.Sum(nil))
@@ -55,7 +55,7 @@ func TestWebhookIngress_ValidSignature(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/webhook", bytes.NewBuffer(payload))
 	req.Header.Set("X-Hub-Signature-256", signature)
 	req.Header.Set("X-GitHub-Event", "pull_request")
-	
+
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
@@ -71,7 +71,7 @@ func TestWebhookIngress_InvalidJSON(t *testing.T) {
 
 	s := NewServer(pstore_client.GetTestClient())
 	payload := []byte(`{invalid-json}`)
-	
+
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write(payload)
 	signature := "sha256=" + hex.EncodeToString(h.Sum(nil))
@@ -79,7 +79,7 @@ func TestWebhookIngress_InvalidJSON(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/webhook", bytes.NewBuffer(payload))
 	req.Header.Set("X-Hub-Signature-256", signature)
 	req.Header.Set("X-GitHub-Event", "pull_request")
-	
+
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 

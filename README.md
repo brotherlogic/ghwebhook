@@ -5,6 +5,7 @@ GHWebhook is a GitHub webhook proxy for Kubernetes. It centralizes webhook handl
 ## Features
 - **Centralized Ingress:** Single entry point for all GitHub webhooks.
 - **gRPC Routing:** Routes JSON webhooks to handlers as type-safe Proto objects.
+- **Observability:** Exposes standard Go metrics and application metrics via Prometheus.
 - **Reliable Delivery:** Exponential backoff retries and a "3 strikes" removal policy.
 - **Multi-tenancy:** Supports multiple services registering for the same repository.
 - **Security:** HMAC-SHA256 signature validation for all incoming requests.
@@ -20,6 +21,7 @@ The following requirements must be met to deploy GHWebhook in a production Kuber
 - **HTTP Ingress (Port 8080):** 
   - Path: `/webhook` (POST) for receiving GitHub events.
   - Path: `/healthz` (GET) for liveness/readiness probes.
+  - Path: `/metrics` (GET) for Prometheus metrics.
 - **gRPC Server (Port 50051):**
   - Used by internal services to register for repositories.
   - Implements the standard gRPC Health Check service.

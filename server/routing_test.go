@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	pstore_client "github.com/brotherlogic/pstore/client"
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
+	pstore_client "github.com/brotherlogic/pstore/client"
 	"google.golang.org/grpc"
 )
 
@@ -66,8 +66,8 @@ func TestRouting_ConcurrentDelivery(t *testing.T) {
 	payload := []byte(`{"action": "opened", "pull_request": {"title": "Test PR", "user": {"login": "user1"}}, "repository": {"full_name": "repo/test"}}`)
 	req, _ := http.NewRequest("POST", "/webhook", bytes.NewBuffer(payload))
 	req.Header.Set("X-GitHub-Event", "pull_request")
-	req.Header.Set("X-Hub-Signature-256", "sha256=" + computeHMAC(payload, secret))
-	
+	req.Header.Set("X-Hub-Signature-256", "sha256="+computeHMAC(payload, secret))
+
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
