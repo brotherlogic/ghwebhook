@@ -6,25 +6,25 @@ import (
 	"sync"
 	"time"
 
+	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
-	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 type Server struct {
 	pb.UnimplementedRegistrationServiceServer
 	pstore pstore_client.PStoreClient
-	
+
 	connLock sync.Mutex
 	conns    map[string]pb.WebhookHandlerClient
 
 	strikeLock sync.Mutex
 	strikes    map[string]int
-	
+
 	// Configurable for testing
 	backoffs []time.Duration
 }
@@ -40,7 +40,7 @@ func NewServer(pstore pstore_client.PStoreClient) *Server {
 
 func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb.RegistrationResponse, error) {
 	key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
-	
+
 	val, err := anypb.New(req)
 	if err != nil {
 		return &pb.RegistrationResponse{Success: false, Message: err.Error()}, nil
@@ -119,7 +119,7 @@ func (s *Server) deliverWithRetry(ctx context.Context, event *pb.WebhookEvent, a
 		if lastErr == nil {
 			return nil
 		}
-		
+
 		// Don't sleep after the last attempt
 		if i < len(s.backoffs)-1 {
 			select {
@@ -129,6 +129,6 @@ func (s *Server) deliverWithRetry(ctx context.Context, event *pb.WebhookEvent, a
 			}
 		}
 	}
-	
+
 	return lastErr
 }
