@@ -124,12 +124,18 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 				count := s.strikes[key]
 				s.strikeLock.Unlock()
 
+				// Track strike metrics
+				RegistrationStrikesTotal.WithLabelValues(repo, address).Inc()
+
 				if count >= 3 {
 					log.Printf("Service %s reached 3 strikes, removing registration", address)
 					_, deleteErr := s.pstore.Delete(ctx, &pstore_pb.DeleteRequest{Key: key})
 					if deleteErr != nil {
 						log.Printf("Failed to delete registration for %s: %v", address, deleteErr)
 					}
+					// Track removal and registration count metrics
+					RegistrationRemovalsTotal.WithLabelValues(repo, address, "max_strikes").Inc()
+					RegistrationsTotal.WithLabelValues(repo, address).Set(0)
 				}
 			} else {
 				OutgoingEventsTotal.WithLabelValues(outgoingMetricEventType, address, "success").Inc()

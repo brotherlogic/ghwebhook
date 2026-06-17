@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -24,6 +25,11 @@ func main() {
 
 	// 2. Initialize GHWebhook Server
 	s := server.NewServer(ps)
+
+	// Scan existing registrations to initialize metrics
+	if err := s.ScanRegistrations(context.Background()); err != nil {
+		log.Printf("Warning: failed to scan existing registrations for metrics: %v", err)
+	}
 
 	// 3. Start gRPC Server (for registration and health)
 	grpcPort := 50051
