@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
-	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -80,7 +80,7 @@ func TestReliableDelivery_ThreeStrikesRemoval(t *testing.T) {
 
 	// 4. Trigger 3 consecutive failed delivery cycles
 	event := &pb.WebhookEvent{Header: &pb.EventHeader{EventType: "pull_request"}}
-	
+
 	for i := 0; i < 3; i++ {
 		server.routeEvent(context.Background(), event, repo)
 	}

@@ -14,16 +14,16 @@ import (
 	"sync"
 	"time"
 
-	pstore_pb "github.com/brotherlogic/pstore/proto"
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
+	pstore_pb "github.com/brotherlogic/pstore/proto"
 )
 
 type githubPayload struct {
-	Action      string            `json:"action"`
-	Number      int32             `json:"number"`
-	PullRequest *githubPR         `json:"pull_request"`
-	Issue       *githubIssue      `json:"issue"`
-	Repository  githubRepo        `json:"repository"`
+	Action      string       `json:"action"`
+	Number      int32        `json:"number"`
+	PullRequest *githubPR    `json:"pull_request"`
+	Issue       *githubIssue `json:"issue"`
+	Repository  githubRepo   `json:"repository"`
 }
 
 type githubPR struct {
@@ -100,7 +100,7 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 			defer wg.Done()
 			err := s.deliverWithRetry(ctx, event, address)
 			key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, address)
-			
+
 			if err != nil {
 				log.Printf("Failed to deliver webhook to %s after retries: %v", address, err)
 				s.strikeLock.Lock()
@@ -146,7 +146,7 @@ func (s *Server) validateSignature(payload []byte, signature string) bool {
 func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent {
 	event := &pb.WebhookEvent{
 		Header: &pb.EventHeader{
-			EventType:     eventType,
+			EventType:    eventType,
 			ReceivedAtMs: time.Now().UnixMilli(),
 		},
 	}
@@ -156,11 +156,11 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 		if gh.PullRequest != nil {
 			event.Payload = &pb.WebhookEvent_PullRequest{
 				PullRequest: &pb.PullRequestEvent{
-					Action: gh.Action,
-					Number: gh.Number,
-					Title:  gh.PullRequest.Title,
-					Body:   gh.PullRequest.Body,
-					User:   &pb.User{Login: gh.PullRequest.User.Login},
+					Action:     gh.Action,
+					Number:     gh.Number,
+					Title:      gh.PullRequest.Title,
+					Body:       gh.PullRequest.Body,
+					User:       &pb.User{Login: gh.PullRequest.User.Login},
 					Repository: &pb.Repository{FullName: gh.Repository.FullName},
 				},
 			}
@@ -169,11 +169,11 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 		if gh.Issue != nil {
 			event.Payload = &pb.WebhookEvent_Issue{
 				Issue: &pb.IssueEvent{
-					Action: gh.Action,
-					Number: gh.Number,
-					Title:  gh.Issue.Title,
-					Body:   gh.Issue.Body,
-					User:   &pb.User{Login: gh.Issue.User.Login},
+					Action:     gh.Action,
+					Number:     gh.Number,
+					Title:      gh.Issue.Title,
+					Body:       gh.Issue.Body,
+					User:       &pb.User{Login: gh.Issue.User.Login},
 					Repository: &pb.Repository{FullName: gh.Repository.FullName},
 				},
 			}
