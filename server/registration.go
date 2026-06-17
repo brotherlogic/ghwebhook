@@ -59,8 +59,36 @@ func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb
 	delete(s.strikes, key)
 	s.strikeLock.Unlock()
 
+	// Track active registration metrics
+	RegistrationsTotal.WithLabelValues(req.RepoFullName, req.ServiceAddress).Set(1)
+
 	return &pb.RegistrationResponse{Success: true}, nil
 }
+
+func (s *Server) ScanRegistrations(ctx context.Context) error {
+	resp, err := s.pstore.GetKeys(ctx, &pstore_pb.GetKeysRequest{Prefix: "ghwebhook/reg/"})
+	if err != nil {
+		return err
+	}
+
+	for _, key := range resp.Keys {
+		readResp, err := s.pstore.Read(ctx, &pstore_pb.ReadRequest{Key: key})
+		if err != nil {
+			return err
+		}
+
+		reg := &pb.RegistrationRequest{}
+		err = proto.Unmarshal(readResp.Value.Value, reg)
+		if err != nil {
+			return err
+		}
+
+		RegistrationsTotal.WithLabelValues(reg.RepoFullName, reg.ServiceAddress).Set(1)
+	}
+
+	return nil
+}
+
 
 func (s *Server) getRegistrations(ctx context.Context, repo string) ([]*pb.RegistrationRequest, error) {
 	prefix := fmt.Sprintf("ghwebhook/reg/%s/", repo)
