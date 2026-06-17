@@ -8,6 +8,7 @@ GHWebhook is a GitHub webhook proxy for Kubernetes. It centralizes webhook handl
 - **Reliable Delivery:** Exponential backoff retries and a "3 strikes" removal policy.
 - **Multi-tenancy:** Supports multiple services registering for the same repository.
 - **Security:** HMAC-SHA256 signature validation for all incoming requests.
+- **Observability:** Prometheus metrics tracking incoming/outgoing webhooks, active registrations, strikes, and removals.
 
 ## Production Deployment Requirements
 
