@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	"github.com/brotherlogic/ghwebhook/server"
@@ -23,8 +24,20 @@ func main() {
 		log.Fatalf("Failed to initialize pstore client: %v", err)
 	}
 
+	ghToken := os.Getenv("GH_TOKEN")
+	if ghToken == "" {
+		ghToken = os.Getenv("GITHUB_TOKEN")
+	}
+	ingressURL := os.Getenv("GHWEBHOOK_INGRESS_URL")
+
+	ghClient := server.NewDefaultGitHubHookClient(ghToken)
+
 	// 2. Initialize GHWebhook Server
-	s := server.NewServer(ps)
+	s := server.NewServer(
+		ps,
+		server.WithGitHubClient(ghClient),
+		server.WithIngressURL(ingressURL),
+	)
 
 	// Scan existing registrations to initialize metrics
 	if err := s.ScanRegistrations(context.Background()); err != nil {
