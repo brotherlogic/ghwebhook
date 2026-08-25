@@ -25,17 +25,51 @@ type Server struct {
 	strikeLock sync.Mutex
 	strikes    map[string]int
 
+	ghClient   GitHubHookClient
+	ingressURL string
+
 	// Configurable for testing
 	backoffs []time.Duration
 }
 
-func NewServer(pstore pstore_client.PStoreClient) *Server {
-	return &Server{
+// ServerOption configures a Server instance.
+type ServerOption func(*Server)
+
+// WithGitHubClient configures the GitHub client for the Server.
+func WithGitHubClient(client GitHubHookClient) ServerOption {
+	return func(s *Server) {
+		s.ghClient = client
+	}
+}
+
+// WithIngressURL configures the ingress URL for the Server.
+func WithIngressURL(ingressURL string) ServerOption {
+	return func(s *Server) {
+		s.ingressURL = ingressURL
+	}
+}
+
+func NewServer(pstore pstore_client.PStoreClient, opts ...ServerOption) *Server {
+	s := &Server{
 		pstore:   pstore,
 		conns:    make(map[string]pb.WebhookHandlerClient),
 		strikes:  make(map[string]int),
 		backoffs: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 60 * time.Second},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// GetGitHubClient returns the configured GitHubHookClient.
+func (s *Server) GetGitHubClient() GitHubHookClient {
+	return s.ghClient
+}
+
+// GetIngressURL returns the configured Ingress URL.
+func (s *Server) GetIngressURL() string {
+	return s.ingressURL
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb.RegistrationResponse, error) {
