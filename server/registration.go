@@ -10,7 +10,9 @@ import (
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 )
@@ -97,6 +99,45 @@ func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb
 	RegistrationsTotal.WithLabelValues(req.RepoFullName, req.ServiceAddress).Set(1)
 
 	return &pb.RegistrationResponse{Success: true}, nil
+}
+
+// Unregister removes an existing registration for a repository and cleans up associated state.
+func (s *Server) Unregister(ctx context.Context, req *pb.UnregisterRequest) (*pb.UnregisterResponse, error) {
+	if req == nil || req.GetRepoFullName() == "" || req.GetServiceAddress() == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "repo_full_name and service_address must be provided")
+	}
+
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
+
+	readResp, err := s.pstore.Read(ctx, &pstore_pb.ReadRequest{Key: key})
+	if err != nil || readResp == nil || readResp.Value == nil || len(readResp.Value.Value) == 0 {
+		return nil, status.Errorf(codes.NotFound, "registration not found")
+	}
+
+	_, err = s.pstore.Delete(ctx, &pstore_pb.DeleteRequest{Key: key})
+	if err != nil {
+		return nil, err
+	}
+
+	// Clean up in-memory strikes
+	s.strikeLock.Lock()
+	delete(s.strikes, key)
+	s.strikeLock.Unlock()
+
+	// Update gauge metric
+	RegistrationsTotal.WithLabelValues(req.RepoFullName, req.ServiceAddress).Set(0)
+
+	// Query remaining registrations for the repository
+	remaining, err := s.getRegistrations(ctx, req.RepoFullName)
+	if err == nil && len(remaining) == 0 && s.ghClient != nil {
+		go s.deleteGitHubWebhookAsync(req.RepoFullName)
+	}
+
+	return &pb.UnregisterResponse{Success: true}, nil
+}
+
+func (s *Server) deleteGitHubWebhookAsync(repoFullName string) {
+	// Async GitHub webhook cleanup logic implemented in sub-issue #57
 }
 
 func (s *Server) ScanRegistrations(ctx context.Context) error {
