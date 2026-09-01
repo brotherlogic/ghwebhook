@@ -2,14 +2,18 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
+	"github.com/google/go-github/v69/github"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
@@ -347,4 +351,302 @@ func TestUnregister_MultiServiceRetention(t *testing.T) {
 		t.Errorf("Expected remaining service to be %s, got %s", addr2, regs[0].ServiceAddress)
 	}
 }
+
+type mockGitHubHookClient struct {
+	listHooksFunc  func(ctx context.Context, owner, repo string) ([]*github.Hook, error)
+	deleteHookFunc func(ctx context.Context, owner, repo string, hookID int64) error
+}
+
+func (m *mockGitHubHookClient) ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+	if m.listHooksFunc != nil {
+		return m.listHooksFunc(ctx, owner, repo)
+	}
+	return nil, nil
+}
+
+func (m *mockGitHubHookClient) DeleteHook(ctx context.Context, owner, repo string, hookID int64) error {
+	if m.deleteHookFunc != nil {
+		return m.deleteHookFunc(ctx, owner, repo, hookID)
+	}
+	return nil
+}
+
+func TestDeleteGitHubWebhook_Success(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://example.com/webhook"
+	hookID := int64(98765)
+
+	var deleteCalled atomic.Bool
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			if owner != "brotherlogic" || repo != "ghwebhook" {
+				t.Errorf("Unexpected repo: %s/%s", owner, repo)
+			}
+			url := ingressURL
+			otherURL := "https://other.com/webhook"
+			otherID := int64(11111)
+			return []*github.Hook{
+				{
+					ID: &otherID,
+					Config: &github.HookConfig{
+						URL: &otherURL,
+					},
+				},
+				{
+					ID: &hookID,
+					Config: &github.HookConfig{
+						URL: &url,
+					},
+				},
+			}, nil
+		},
+		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
+			if id != hookID {
+				t.Errorf("Unexpected hookID deleted: %d, want %d", id, hookID)
+			}
+			deleteCalled.Store(true)
+			return nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
+
+	err := s.deleteGitHubWebhook(context.Background(), "brotherlogic/ghwebhook")
+	if err != nil {
+		t.Fatalf("deleteGitHubWebhook failed: %v", err)
+	}
+
+	if !deleteCalled.Load() {
+		t.Errorf("Expected DeleteHook to be called, but it was not")
+	}
+}
+
+func TestDeleteGitHubWebhook_404HandledAsSuccess(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://example.com/webhook"
+	hookID := int64(98765)
+
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			url := ingressURL
+			return []*github.Hook{
+				{
+					ID: &hookID,
+					Config: &github.HookConfig{
+						URL: &url,
+					},
+				},
+			}, nil
+		},
+		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
+			return &github.ErrorResponse{
+				Response: &http.Response{StatusCode: http.StatusNotFound},
+				Message:  "Not Found",
+			}
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
+
+	err := s.deleteGitHubWebhook(context.Background(), "brotherlogic/ghwebhook")
+	if err != nil {
+		t.Errorf("Expected 404 to be treated as success, got error: %v", err)
+	}
+}
+
+func TestDeleteGitHubWebhook_ConcurrencyGuard(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	repo := "brotherlogic/ghwebhook"
+
+	var listCalled atomic.Bool
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			listCalled.Store(true)
+			return nil, nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL("https://example.com/webhook"),
+	)
+
+	// Register a service before deletion check
+	_, err := s.Register(context.Background(), &pb.RegistrationRequest{
+		RepoFullName:   repo,
+		ServiceAddress: "localhost:50051",
+	})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// Calling deleteGitHubWebhook should abort because registration exists
+	err = s.deleteGitHubWebhook(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("deleteGitHubWebhook returned unexpected error: %v", err)
+	}
+
+	if listCalled.Load() {
+		t.Errorf("Expected deleteGitHubWebhook to abort due to concurrency guard, but ListHooks was called")
+	}
+}
+
+func TestDeleteGitHubWebhook_MissingConfigOrMalformedRepo(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+
+	mockClient := &mockGitHubHookClient{}
+
+	tests := []struct {
+		name       string
+		server     *Server
+		repo       string
+	}{
+		{
+			name:   "nil ghClient",
+			server: NewServer(ps, WithIngressURL("https://example.com/webhook")),
+			repo:   "brotherlogic/ghwebhook",
+		},
+		{
+			name:   "empty ingressURL",
+			server: NewServer(ps, WithGitHubClient(mockClient), WithIngressURL("")),
+			repo:   "brotherlogic/ghwebhook",
+		},
+		{
+			name:   "malformed repo without slash",
+			server: NewServer(ps, WithGitHubClient(mockClient), WithIngressURL("https://example.com/webhook")),
+			repo:   "invalidrepo",
+		},
+		{
+			name:   "empty repo string",
+			server: NewServer(ps, WithGitHubClient(mockClient), WithIngressURL("https://example.com/webhook")),
+			repo:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.server.deleteGitHubWebhook(context.Background(), tt.repo)
+			if err != nil {
+				t.Errorf("Expected nil error for graceful handling, got %v", err)
+			}
+		})
+	}
+}
+
+func TestDeleteGitHubWebhook_TransientErrorRetry(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://example.com/webhook"
+	hookID := int64(12345)
+
+	var listAttempts atomic.Int32
+	var deleteAttempts atomic.Int32
+
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			attempts := listAttempts.Add(1)
+			if attempts < 2 {
+				return nil, errors.New("transient network failure")
+			}
+			url := ingressURL
+			return []*github.Hook{
+				{
+					ID: &hookID,
+					Config: &github.HookConfig{
+						URL: &url,
+					},
+				},
+			}, nil
+		},
+		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
+			attempts := deleteAttempts.Add(1)
+			if attempts < 2 {
+				return errors.New("transient delete failure")
+			}
+			return nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
+	s.backoffs = []time.Duration{1 * time.Millisecond, 2 * time.Millisecond}
+
+	err := s.deleteGitHubWebhook(context.Background(), "brotherlogic/ghwebhook")
+	if err != nil {
+		t.Fatalf("deleteGitHubWebhook failed despite retries: %v", err)
+	}
+
+	if listAttempts.Load() != 2 {
+		t.Errorf("Expected 2 list attempts, got %d", listAttempts.Load())
+	}
+	if deleteAttempts.Load() != 2 {
+		t.Errorf("Expected 2 delete attempts, got %d", deleteAttempts.Load())
+	}
+}
+
+func TestUnregister_TriggersAsyncWebhookDeletion(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://example.com/webhook"
+	hookID := int64(55555)
+
+	deleted := make(chan bool, 1)
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			url := ingressURL
+			return []*github.Hook{
+				{
+					ID: &hookID,
+					Config: &github.HookConfig{
+						URL: &url,
+					},
+				},
+			}, nil
+		},
+		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
+			if id == hookID {
+				deleted <- true
+			}
+			return nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
+	s.backoffs = []time.Duration{1 * time.Millisecond}
+
+	repo := "brotherlogic/ghwebhook"
+	addr := "localhost:50051"
+
+	_, err := s.Register(context.Background(), &pb.RegistrationRequest{RepoFullName: repo, ServiceAddress: addr})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	_, err = s.Unregister(context.Background(), &pb.UnregisterRequest{RepoFullName: repo, ServiceAddress: addr})
+	if err != nil {
+		t.Fatalf("Unregister failed: %v", err)
+	}
+
+	select {
+	case <-deleted:
+		// Webhook deletion was triggered asynchronously and completed
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for asynchronous webhook deletion")
+	}
+}
+
 
