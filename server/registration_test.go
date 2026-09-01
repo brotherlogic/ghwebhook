@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -164,6 +165,7 @@ func TestRegistrationMetrics(t *testing.T) {
 	}
 
 	// 3. Test strikes and removal metrics
+	repoStrikes := "metrics-test/repo-strikes"
 	// Set up always-failing handler
 	handler := &failingWebhookHandler{maxFails: 100}
 	lis, _ := net.Listen("tcp", "127.0.0.1:0")
@@ -177,7 +179,7 @@ func TestRegistrationMetrics(t *testing.T) {
 
 	// Register the test handler address
 	_, err = s.Register(context.Background(), &pb.RegistrationRequest{
-		RepoFullName:   repo,
+		RepoFullName:   repoStrikes,
 		ServiceAddress: testAddr,
 	})
 	if err != nil {
@@ -185,7 +187,7 @@ func TestRegistrationMetrics(t *testing.T) {
 	}
 
 	// Initial strikes should be 0
-	strikeVal := testutil.ToFloat64(RegistrationStrikesTotal.WithLabelValues(repo, testAddr))
+	strikeVal := testutil.ToFloat64(RegistrationStrikesTotal.WithLabelValues(repoStrikes, testAddr))
 	if strikeVal != 0 {
 		t.Errorf("Expected initial strikes to be 0, got %f", strikeVal)
 	}
@@ -193,22 +195,22 @@ func TestRegistrationMetrics(t *testing.T) {
 	// Trigger 3 failed deliveries
 	event := &pb.WebhookEvent{Header: &pb.EventHeader{EventType: "pull_request"}}
 	for i := 0; i < 3; i++ {
-		s.routeEvent(context.Background(), event, repo)
+		s.routeEvent(context.Background(), event, repoStrikes)
 	}
 
 	// Verify strikes accumulated (should be 3)
-	strikeVal = testutil.ToFloat64(RegistrationStrikesTotal.WithLabelValues(repo, testAddr))
+	strikeVal = testutil.ToFloat64(RegistrationStrikesTotal.WithLabelValues(repoStrikes, testAddr))
 	if strikeVal != 3 {
 		t.Errorf("Expected strikes to be 3, got %f", strikeVal)
 	}
 
 	// Verify removal count and registrations gauge reset to 0
-	removalVal := testutil.ToFloat64(RegistrationRemovalsTotal.WithLabelValues(repo, testAddr, "max_strikes"))
+	removalVal := testutil.ToFloat64(RegistrationRemovalsTotal.WithLabelValues(repoStrikes, testAddr, "max_strikes"))
 	if removalVal != 1.0 {
 		t.Errorf("Expected removals to be 1.0, got %f", removalVal)
 	}
 
-	regVal := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repo, testAddr))
+	regVal := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repoStrikes, testAddr))
 	if regVal != 0 {
 		t.Errorf("Expected RegistrationsTotal for removed client to be 0, got %f", regVal)
 	}
@@ -318,7 +320,19 @@ func TestUnregister_InvalidArgument(t *testing.T) {
 
 func TestUnregister_MultiServiceRetention(t *testing.T) {
 	ps := pstore_client.GetTestClient()
-	s := NewServer(ps)
+	ingressURL := "https://example.com/webhook"
+	var deleteCalled atomic.Bool
+	mockClient := &mockGitHubHookClient{
+		deleteHookFunc: func(ctx context.Context, owner, repo string, hookID int64) error {
+			deleteCalled.Store(true)
+			return nil
+		},
+	}
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
 
 	repo := "brotherlogic/ghwebhook"
 	addr1 := "localhost:50051"
@@ -333,10 +347,19 @@ func TestUnregister_MultiServiceRetention(t *testing.T) {
 		t.Fatalf("Register failed: %v", err)
 	}
 
-	// Unregister first service
-	_, err = s.Unregister(context.Background(), &pb.UnregisterRequest{RepoFullName: repo, ServiceAddress: addr1})
+	// Unregister first service while addr2 remains
+	resp, err := s.Unregister(context.Background(), &pb.UnregisterRequest{RepoFullName: repo, ServiceAddress: addr1})
 	if err != nil {
 		t.Fatalf("Unregister failed: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected Unregister success, got false")
+	}
+
+	// Wait briefly to confirm async webhook deletion was NOT triggered
+	time.Sleep(50 * time.Millisecond)
+	if deleteCalled.Load() {
+		t.Errorf("Expected DeleteHook NOT to be called when remaining services exist")
 	}
 
 	// Check remaining registrations
@@ -369,6 +392,80 @@ func (m *mockGitHubHookClient) DeleteHook(ctx context.Context, owner, repo strin
 		return m.deleteHookFunc(ctx, owner, repo, hookID)
 	}
 	return nil
+}
+
+func TestUnregister_LastServiceGitHubDeletion(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://example.com/webhook"
+	hookID := int64(98765)
+
+	deleted := make(chan int64, 1)
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			if owner != "brotherlogic" || repo != "ghwebhook" {
+				t.Errorf("Unexpected repo: %s/%s", owner, repo)
+			}
+			url := ingressURL
+			otherURL := "https://other.com/webhook"
+			otherID := int64(11111)
+			return []*github.Hook{
+				{
+					ID: &otherID,
+					Config: &github.HookConfig{
+						URL: &otherURL,
+					},
+				},
+				{
+					ID: &hookID,
+					Config: &github.HookConfig{
+						URL: &url,
+					},
+				},
+			}, nil
+		},
+		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
+			deleted <- id
+			return nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+	)
+	s.backoffs = []time.Duration{1 * time.Millisecond}
+
+	repo := "brotherlogic/ghwebhook"
+	addr := "localhost:50051"
+
+	_, err := s.Register(context.Background(), &pb.RegistrationRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	resp, err := s.Unregister(context.Background(), &pb.UnregisterRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
+	if err != nil {
+		t.Fatalf("Unregister failed: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected success to be true, got false")
+	}
+
+	select {
+	case id := <-deleted:
+		if id != hookID {
+			t.Errorf("Expected deleted hookID %d, got %d", hookID, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timed out waiting for mock GitHub client DeleteHook invocation on last service unregister")
+	}
 }
 
 func TestDeleteGitHubWebhook_Success(t *testing.T) {
@@ -425,7 +522,7 @@ func TestDeleteGitHubWebhook_Success(t *testing.T) {
 	}
 }
 
-func TestDeleteGitHubWebhook_404HandledAsSuccess(t *testing.T) {
+func TestUnregister_GitHubDeletion404(t *testing.T) {
 	ps := pstore_client.GetTestClient()
 	ingressURL := "https://example.com/webhook"
 	hookID := int64(98765)
@@ -462,7 +559,7 @@ func TestDeleteGitHubWebhook_404HandledAsSuccess(t *testing.T) {
 	}
 }
 
-func TestDeleteGitHubWebhook_ConcurrencyGuard(t *testing.T) {
+func TestUnregister_ConcurrencyGuard(t *testing.T) {
 	ps := pstore_client.GetTestClient()
 	repo := "brotherlogic/ghwebhook"
 
@@ -506,9 +603,9 @@ func TestDeleteGitHubWebhook_MissingConfigOrMalformedRepo(t *testing.T) {
 	mockClient := &mockGitHubHookClient{}
 
 	tests := []struct {
-		name       string
-		server     *Server
-		repo       string
+		name   string
+		server *Server
+		repo   string
 	}{
 		{
 			name:   "nil ghClient",
@@ -595,12 +692,12 @@ func TestDeleteGitHubWebhook_TransientErrorRetry(t *testing.T) {
 	}
 }
 
-func TestUnregister_TriggersAsyncWebhookDeletion(t *testing.T) {
+func TestUnregister_gRPCIntegration(t *testing.T) {
 	ps := pstore_client.GetTestClient()
 	ingressURL := "https://example.com/webhook"
-	hookID := int64(55555)
+	hookID := int64(77777)
 
-	deleted := make(chan bool, 1)
+	deleted := make(chan int64, 1)
 	mockClient := &mockGitHubHookClient{
 		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
 			url := ingressURL
@@ -614,39 +711,88 @@ func TestUnregister_TriggersAsyncWebhookDeletion(t *testing.T) {
 			}, nil
 		},
 		deleteHookFunc: func(ctx context.Context, owner, repo string, id int64) error {
-			if id == hookID {
-				deleted <- true
-			}
+			deleted <- id
 			return nil
 		},
 	}
 
-	s := NewServer(
+	srv := NewServer(
 		ps,
 		WithGitHubClient(mockClient),
 		WithIngressURL(ingressURL),
 	)
-	s.backoffs = []time.Duration{1 * time.Millisecond}
+	srv.backoffs = []time.Duration{1 * time.Millisecond}
 
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	pb.RegisterRegistrationServiceServer(grpcServer, srv)
+	go grpcServer.Serve(lis)
+	defer grpcServer.Stop()
+
+	conn, err := grpc.Dial(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial gRPC server: %v", err)
+	}
+	defer conn.Close()
+
+	client := pb.NewRegistrationServiceClient(conn)
 	repo := "brotherlogic/ghwebhook"
-	addr := "localhost:50051"
+	addr := "127.0.0.1:50051"
 
-	_, err := s.Register(context.Background(), &pb.RegistrationRequest{RepoFullName: repo, ServiceAddress: addr})
+	// 1. Register via gRPC client
+	regResp, err := client.Register(context.Background(), &pb.RegistrationRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
 	if err != nil {
-		t.Fatalf("Register failed: %v", err)
+		t.Fatalf("gRPC Register failed: %v", err)
+	}
+	if !regResp.Success {
+		t.Fatalf("gRPC Register returned success=false")
 	}
 
-	_, err = s.Unregister(context.Background(), &pb.UnregisterRequest{RepoFullName: repo, ServiceAddress: addr})
-	if err != nil {
-		t.Fatalf("Unregister failed: %v", err)
+	// Verify gauge is 1.0
+	if val := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repo, addr)); val != 1.0 {
+		t.Errorf("Expected RegistrationsTotal to be 1.0, got %f", val)
 	}
 
+	// 2. Unregister via gRPC client
+	unregResp, err := client.Unregister(context.Background(), &pb.UnregisterRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
+	if err != nil {
+		t.Fatalf("gRPC Unregister failed: %v", err)
+	}
+	if !unregResp.Success {
+		t.Fatalf("gRPC Unregister returned success=false")
+	}
+
+	// Verify gauge reset to 0
+	if val := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repo, addr)); val != 0 {
+		t.Errorf("Expected RegistrationsTotal to be 0, got %f", val)
+	}
+
+	// Verify pstore record is gone
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, addr)
+	readResp, err := ps.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+	if err == nil && readResp.Value != nil && len(readResp.Value.Value) > 0 {
+		t.Errorf("Expected key to be deleted from pstore, but found value: %v", readResp.Value)
+	}
+
+	// Verify async webhook deletion completed
 	select {
-	case <-deleted:
-		// Webhook deletion was triggered asynchronously and completed
+	case id := <-deleted:
+		if id != hookID {
+			t.Errorf("Expected deleted hookID %d, got %d", hookID, id)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Timed out waiting for asynchronous webhook deletion")
+		t.Fatal("Timed out waiting for asynchronous webhook deletion via gRPC Unregister")
 	}
 }
+
 
 
