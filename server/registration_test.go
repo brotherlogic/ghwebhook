@@ -13,6 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -207,3 +209,142 @@ func TestRegistrationMetrics(t *testing.T) {
 		t.Errorf("Expected RegistrationsTotal for removed client to be 0, got %f", regVal)
 	}
 }
+
+func TestUnregister_Success(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	s := NewServer(ps)
+
+	repo := "brotherlogic/ghwebhook"
+	addr := "localhost:50051"
+
+	// Register service
+	_, err := s.Register(context.Background(), &pb.RegistrationRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// Set in-memory strike to verify it gets cleaned up
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, addr)
+	s.strikeLock.Lock()
+	s.strikes[key] = 2
+	s.strikeLock.Unlock()
+
+	// Verify metric gauge is 1
+	if val := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repo, addr)); val != 1.0 {
+		t.Errorf("Expected RegistrationsTotal to be 1.0, got %f", val)
+	}
+
+	// Call Unregister
+	resp, err := s.Unregister(context.Background(), &pb.UnregisterRequest{
+		RepoFullName:   repo,
+		ServiceAddress: addr,
+	})
+	if err != nil {
+		t.Fatalf("Unregister failed: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("Expected success to be true, got false: %s", resp.Message)
+	}
+
+	// Verify pstore key is deleted
+	readResp, err := s.pstore.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+	if err == nil && readResp.Value != nil && len(readResp.Value.Value) > 0 {
+		t.Errorf("Expected key to be deleted from pstore, but found value: %v", readResp.Value)
+	}
+
+	// Verify in-memory strikes cleaned up
+	s.strikeLock.Lock()
+	if strikes, ok := s.strikes[key]; ok {
+		t.Errorf("Expected strikes to be deleted for %s, but found %d", key, strikes)
+	}
+	s.strikeLock.Unlock()
+
+	// Verify metric gauge is reset to 0
+	if val := testutil.ToFloat64(RegistrationsTotal.WithLabelValues(repo, addr)); val != 0 {
+		t.Errorf("Expected RegistrationsTotal to be 0 after Unregister, got %f", val)
+	}
+}
+
+func TestUnregister_NotFound(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	s := NewServer(ps)
+
+	_, err := s.Unregister(context.Background(), &pb.UnregisterRequest{
+		RepoFullName:   "brotherlogic/ghwebhook",
+		ServiceAddress: "nonexistent:50051",
+	})
+	if err == nil {
+		t.Fatal("Expected error when unregistering non-existent registration, got nil")
+	}
+
+	if st, ok := status.FromError(err); !ok || st.Code() != codes.NotFound {
+		t.Errorf("Expected codes.NotFound, got: %v", err)
+	}
+}
+
+func TestUnregister_InvalidArgument(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	s := NewServer(ps)
+
+	tests := []struct {
+		name string
+		req  *pb.UnregisterRequest
+	}{
+		{name: "nil request", req: nil},
+		{name: "missing repo", req: &pb.UnregisterRequest{ServiceAddress: "localhost:50051"}},
+		{name: "missing service_address", req: &pb.UnregisterRequest{RepoFullName: "brotherlogic/ghwebhook"}},
+		{name: "empty both", req: &pb.UnregisterRequest{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.Unregister(context.Background(), tt.req)
+			if err == nil {
+				t.Fatal("Expected error for invalid argument, got nil")
+			}
+			if st, ok := status.FromError(err); !ok || st.Code() != codes.InvalidArgument {
+				t.Errorf("Expected codes.InvalidArgument, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestUnregister_MultiServiceRetention(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	s := NewServer(ps)
+
+	repo := "brotherlogic/ghwebhook"
+	addr1 := "localhost:50051"
+	addr2 := "localhost:50052"
+
+	_, err := s.Register(context.Background(), &pb.RegistrationRequest{RepoFullName: repo, ServiceAddress: addr1})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+	_, err = s.Register(context.Background(), &pb.RegistrationRequest{RepoFullName: repo, ServiceAddress: addr2})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	// Unregister first service
+	_, err = s.Unregister(context.Background(), &pb.UnregisterRequest{RepoFullName: repo, ServiceAddress: addr1})
+	if err != nil {
+		t.Fatalf("Unregister failed: %v", err)
+	}
+
+	// Check remaining registrations
+	regs, err := s.getRegistrations(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("getRegistrations failed: %v", err)
+	}
+	if len(regs) != 1 {
+		t.Fatalf("Expected 1 remaining registration, got %d", len(regs))
+	}
+	if regs[0].ServiceAddress != addr2 {
+		t.Errorf("Expected remaining service to be %s, got %s", addr2, regs[0].ServiceAddress)
+	}
+}
+
