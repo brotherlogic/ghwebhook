@@ -2,13 +2,18 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
 	pstore_client "github.com/brotherlogic/pstore/client"
 	pstore_pb "github.com/brotherlogic/pstore/proto"
+	"github.com/google/go-github/v69/github"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -137,7 +142,122 @@ func (s *Server) Unregister(ctx context.Context, req *pb.UnregisterRequest) (*pb
 }
 
 func (s *Server) deleteGitHubWebhookAsync(repoFullName string) {
-	// Async GitHub webhook cleanup logic implemented in sub-issue #57
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := s.deleteGitHubWebhook(ctx, repoFullName); err != nil {
+		log.Printf("Failed to delete GitHub webhook for %s: %v", repoFullName, err)
+	}
+}
+
+func isGitHub404(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errResp *github.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == http.StatusNotFound {
+		return true
+	}
+	return false
+}
+
+func (s *Server) deleteGitHubWebhook(ctx context.Context, repoFullName string) error {
+	if s.ghClient == nil {
+		log.Printf("GitHub client not configured, skipping webhook deletion for %s", repoFullName)
+		return nil
+	}
+
+	if s.ingressURL == "" {
+		log.Printf("Ingress URL not configured, skipping webhook deletion for %s", repoFullName)
+		return nil
+	}
+
+	parts := strings.Split(repoFullName, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		log.Printf("Invalid repository full name %q, expected format owner/repo", repoFullName)
+		return nil
+	}
+	owner, repo := parts[0], parts[1]
+
+	// Concurrency guard: re-verify registrations are still empty before deletion
+	regs, err := s.getRegistrations(ctx, repoFullName)
+	if err != nil {
+		log.Printf("Failed to verify registrations for %s: %v", repoFullName, err)
+		return err
+	}
+	if len(regs) > 0 {
+		log.Printf("Active registrations exist for %s, skipping webhook deletion", repoFullName)
+		return nil
+	}
+
+	backoffs := s.backoffs
+	if len(backoffs) == 0 {
+		backoffs = []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	}
+
+	var hooks []*github.Hook
+	var listErr error
+	for i := 0; i <= len(backoffs); i++ {
+		hooks, listErr = s.ghClient.ListHooks(ctx, owner, repo)
+		if listErr == nil {
+			break
+		}
+		if isGitHub404(listErr) {
+			log.Printf("Repository %s not found (404) when listing hooks", repoFullName)
+			return nil
+		}
+		if i < len(backoffs) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoffs[i]):
+			}
+		}
+	}
+	if listErr != nil {
+		log.Printf("Failed to list webhooks for %s after retries: %v", repoFullName, listErr)
+		return listErr
+	}
+
+	for _, hook := range hooks {
+		if hook == nil {
+			continue
+		}
+		var hookURL string
+		if hook.Config != nil {
+			if hook.Config.URL != nil {
+				hookURL = *hook.Config.URL
+			} else {
+				hookURL = hook.Config.GetURL()
+			}
+		}
+		if hookURL != s.ingressURL {
+			continue
+		}
+
+		hookID := hook.GetID()
+		var deleteErr error
+		for i := 0; i <= len(backoffs); i++ {
+			deleteErr = s.ghClient.DeleteHook(ctx, owner, repo, hookID)
+			if deleteErr == nil || isGitHub404(deleteErr) {
+				log.Printf("Successfully deleted webhook %d for %s", hookID, repoFullName)
+				break
+			}
+			if i < len(backoffs) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoffs[i]):
+				}
+			}
+		}
+		if deleteErr != nil && !isGitHub404(deleteErr) {
+			log.Printf("Failed to delete webhook %d for %s after retries: %v", hookID, repoFullName, deleteErr)
+			return deleteErr
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) ScanRegistrations(ctx context.Context) error {
