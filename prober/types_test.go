@@ -152,6 +152,8 @@ func TestNewProber_Options(t *testing.T) {
 	p := NewProber(
 		WithRepo("octocat/Hello-World"),
 		WithTargetTitle("CUSTOM PROBER TEST"),
+		WithTargetIssueNumber(123),
+		WithTargetAction("opened"),
 		WithGHWebhookAddr("10.0.0.1:50051"),
 		WithListenAddr(":60052"),
 		WithServiceAddr("prober.test.svc:60052"),
@@ -166,11 +168,17 @@ func TestNewProber_Options(t *testing.T) {
 	if p.targetTitle != "CUSTOM PROBER TEST" {
 		t.Errorf("p.targetTitle = %q, want 'CUSTOM PROBER TEST'", p.targetTitle)
 	}
+	if p.targetIssueNumber != 123 {
+		t.Errorf("p.targetIssueNumber = %d, want 123", p.targetIssueNumber)
+	}
+	if p.targetAction != "opened" {
+		t.Errorf("p.targetAction = %q, want 'opened'", p.targetAction)
+	}
 	if p.ghwebhookAddr != "10.0.0.1:50051" {
 		t.Errorf("p.ghwebhookAddr = %q, want '10.0.0.1:50051'", p.ghwebhookAddr)
 	}
-	if p.listenAddr != ":60052" {
-		t.Errorf("p.listenAddr = %q, want ':60052'", p.listenAddr)
+	if p.ListenAddr() != ":60052" {
+		t.Errorf("p.ListenAddr() = %q, want ':60052'", p.ListenAddr())
 	}
 	if p.serviceAddr != "prober.test.svc:60052" {
 		t.Errorf("p.serviceAddr = %q, want 'prober.test.svc:60052'", p.serviceAddr)
@@ -183,5 +191,21 @@ func TestNewProber_Options(t *testing.T) {
 	}
 	if p.regClient != mockReg {
 		t.Errorf("p.regClient = %v, want %v", p.regClient, mockReg)
+	}
+	if p.EventChannel() == nil {
+		t.Error("p.EventChannel() is nil, expected valid channel")
+	}
+}
+
+func TestProber_Setters(t *testing.T) {
+	p := NewProber()
+	p.SetTargetIssueNumber(456)
+	p.SetTargetAction("reopened")
+
+	if p.targetIssueNumber != 456 {
+		t.Errorf("p.targetIssueNumber = %d, want 456", p.targetIssueNumber)
+	}
+	if p.targetAction != "reopened" {
+		t.Errorf("p.targetAction = %q, want 'reopened'", p.targetAction)
 	}
 }

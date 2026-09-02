@@ -1,6 +1,8 @@
 package prober
 
 import (
+	"net"
+	"sync"
 	"time"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
@@ -56,16 +58,20 @@ const (
 type Prober struct {
 	pb.UnimplementedWebhookHandlerServer
 
-	ghClient      GitHubIssueClient
-	regClient     pb.RegistrationServiceClient
-	repoFullName  string
-	targetTitle   string
-	ghwebhookAddr string
-	listenAddr    string
-	serviceAddr   string
-	timeout       time.Duration
-	eventCh       chan *pb.WebhookEvent
-	grpcServer    *grpc.Server
+	ghClient          GitHubIssueClient
+	regClient         pb.RegistrationServiceClient
+	repoFullName      string
+	targetTitle       string
+	targetIssueNumber int
+	targetAction      string
+	ghwebhookAddr     string
+	listenAddr        string
+	serviceAddr       string
+	timeout           time.Duration
+	eventCh           chan *pb.WebhookEvent
+	grpcServer        *grpc.Server
+	listener          net.Listener
+	mu                sync.Mutex
 }
 
 // Option configures a Prober instance.
@@ -82,6 +88,20 @@ func WithRepo(repo string) Option {
 func WithTargetTitle(title string) Option {
 	return func(p *Prober) {
 		p.targetTitle = title
+	}
+}
+
+// WithTargetIssueNumber configures the expected issue number to match against incoming webhooks.
+func WithTargetIssueNumber(number int) Option {
+	return func(p *Prober) {
+		p.targetIssueNumber = number
+	}
+}
+
+// WithTargetAction configures the expected issue action to match against incoming webhooks.
+func WithTargetAction(action string) Option {
+	return func(p *Prober) {
+		p.targetAction = action
 	}
 }
 
@@ -125,6 +145,32 @@ func WithRegistrationClient(client pb.RegistrationServiceClient) Option {
 	return func(p *Prober) {
 		p.regClient = client
 	}
+}
+
+// SetTargetIssueNumber dynamically sets the expected issue number on the Prober.
+func (p *Prober) SetTargetIssueNumber(number int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.targetIssueNumber = number
+}
+
+// SetTargetAction dynamically sets the expected issue action on the Prober.
+func (p *Prober) SetTargetAction(action string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.targetAction = action
+}
+
+// ListenAddr returns the configured or actively bound listener address.
+func (p *Prober) ListenAddr() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.listenAddr
+}
+
+// EventChannel returns a receive-only channel for matching webhook events.
+func (p *Prober) EventChannel() <-chan *pb.WebhookEvent {
+	return p.eventCh
 }
 
 // NewProber creates a new Prober instance initialized with defaults and overridden by options.
