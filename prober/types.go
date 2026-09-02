@@ -1,11 +1,9 @@
 package prober
 
 import (
-	"context"
 	"time"
 
 	pb "github.com/brotherlogic/ghwebhook/proto/ghwebhook/v1"
-	"github.com/google/go-github/v69/github"
 	"google.golang.org/grpc"
 )
 
@@ -53,13 +51,6 @@ const (
 	DefaultServiceAddr   = "127.0.0.1:50052"
 	DefaultTimeout       = 60 * time.Second
 )
-
-// GitHubIssueClient abstracts GitHub issue operations required by the prober.
-type GitHubIssueClient interface {
-	SearchIssues(ctx context.Context, owner, repo, query string) ([]*github.Issue, error)
-	CreateIssue(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error)
-	EditIssue(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error)
-}
 
 // Prober manages the end-to-end validation lifecycle.
 type Prober struct {
