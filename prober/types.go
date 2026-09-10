@@ -173,6 +173,20 @@ func (p *Prober) EventChannel() <-chan *pb.WebhookEvent {
 	return p.eventCh
 }
 
+// GitHubClient returns the configured GitHubIssueClient on the Prober.
+func (p *Prober) GitHubClient() GitHubIssueClient {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ghClient
+}
+
+// RepoFullName returns the configured repository full name on the Prober.
+func (p *Prober) RepoFullName() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.repoFullName
+}
+
 // NewProber creates a new Prober instance initialized with defaults and overridden by options.
 func NewProber(opts ...Option) *Prober {
 	p := &Prober{

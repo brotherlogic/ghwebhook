@@ -78,6 +78,10 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 
+	if token == "" {
+		return nil, errors.New("github token is required (set via --github-token, GH_TOKEN, or GITHUB_TOKEN)")
+	}
+
 	return &Config{
 		Repo:          repo,
 		GHWebhookAddr: ghwebhookAddr,
@@ -89,7 +93,14 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 }
 
 // run executes the prober instance, emits structured logs, and returns the exit code.
-func run(ctx context.Context, p *prober.Prober, stdout, stderr io.Writer) int {
+func run(ctx context.Context, p *prober.Prober, ghClient prober.GitHubIssueClient, repo string, stdout, stderr io.Writer) int {
+	if ghClient == nil && p != nil {
+		ghClient = p.GitHubClient()
+	}
+	if repo == "" && p != nil {
+		repo = p.RepoFullName()
+	}
+
 	result, _ := p.Run(ctx)
 
 	handler := slog.NewJSONHandler(stdout, &slog.HandlerOptions{
@@ -102,35 +113,86 @@ func run(ctx context.Context, p *prober.Prober, stdout, stderr io.Writer) int {
 		errStr = result.Err.Error()
 	}
 
-	logger.Info("prober execution completed",
-		slog.String("status", result.Status.String()),
-		slog.Int("status_code", int(result.Status)),
-		slog.String("action", result.Action),
-		slog.Int("issue_number", result.IssueNumber),
-		slog.Duration("duration", result.Duration),
-		slog.String("message", result.Message),
-		slog.String("error", errStr),
-	)
+	switch result.Status {
+	case prober.StatusSuccess:
+		logger.Info("prober execution completed",
+			slog.String("status", result.Status.String()),
+			slog.Int("status_code", int(result.Status)),
+			slog.String("action", result.Action),
+			slog.Int("issue_number", result.IssueNumber),
+			slog.Duration("duration", result.Duration),
+			slog.String("message", result.Message),
+			slog.String("error", errStr),
+		)
+		return 0
 
-	return int(result.Status)
+	case prober.StatusSoftFailure:
+		logger.Warn("prober encountered soft failure (transient)",
+			slog.String("status", result.Status.String()),
+			slog.Int("status_code", int(result.Status)),
+			slog.String("action", result.Action),
+			slog.Int("issue_number", result.IssueNumber),
+			slog.Duration("duration", result.Duration),
+			slog.String("message", result.Message),
+			slog.String("error", errStr),
+		)
+		return 0
+
+	case prober.StatusHardFailure:
+		logger.Error("prober encountered hard failure",
+			slog.String("status", result.Status.String()),
+			slog.Int("status_code", int(result.Status)),
+			slog.String("action", result.Action),
+			slog.Int("issue_number", result.IssueNumber),
+			slog.Duration("duration", result.Duration),
+			slog.String("message", result.Message),
+			slog.String("error", errStr),
+		)
+
+		alertRes, alertErr := prober.HandleHardFailure(ctx, ghClient, repo, result)
+		if alertErr != nil {
+			logger.Error("failed to handle hard failure alert",
+				slog.String("error", alertErr.Error()),
+				slog.String("repo", repo),
+			)
+			fmt.Fprintf(stderr, "Error handling prober hard failure alert: %v\n", alertErr)
+			return 1
+		}
+
+		logger.Info("prober hard failure alert handled",
+			slog.Bool("deduplicated", alertRes.Deduplicated),
+			slog.Int("alert_issue_number", alertRes.IssueNumber),
+			slog.String("alert_issue_url", alertRes.IssueURL),
+		)
+		return 0
+
+	default:
+		return 1
+	}
 }
 
 // runWithProber constructs a Prober from Config and executes it.
 func runWithProber(ctx context.Context, cfg *Config, stdout, stderr io.Writer, extraOpts ...prober.Option) int {
 	ghClient := prober.NewDefaultGitHubIssueClient(cfg.GitHubToken)
+	return runWithProberAndClient(ctx, cfg, ghClient, stdout, stderr, extraOpts...)
+}
 
+// runWithProberAndClient constructs a Prober from Config and an explicit GitHubIssueClient.
+func runWithProberAndClient(ctx context.Context, cfg *Config, ghClient prober.GitHubIssueClient, stdout, stderr io.Writer, extraOpts ...prober.Option) int {
 	opts := []prober.Option{
 		prober.WithRepo(cfg.Repo),
 		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
 		prober.WithListenAddr(cfg.ListenAddr),
 		prober.WithServiceAddr(cfg.ServiceAddr),
 		prober.WithTimeout(cfg.Timeout),
-		prober.WithGitHubClient(ghClient),
+	}
+	if ghClient != nil {
+		opts = append(opts, prober.WithGitHubClient(ghClient))
 	}
 	opts = append(opts, extraOpts...)
 
 	p := prober.NewProber(opts...)
-	return run(ctx, p, stdout, stderr)
+	return run(ctx, p, p.GitHubClient(), cfg.Repo, stdout, stderr)
 }
 
 func main() {
@@ -140,7 +202,7 @@ func main() {
 			os.Exit(0)
 		}
 		fmt.Fprintf(os.Stderr, "Error parsing configuration: %v\n", err)
-		os.Exit(int(prober.StatusHardFailure))
+		os.Exit(1)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
