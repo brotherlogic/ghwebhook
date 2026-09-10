@@ -10,8 +10,9 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ghwebhook .
+# Build the binaries
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /bin/ghwebhook .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /bin/prober ./cmd/prober
 
 # Final stage
 FROM alpine:latest
@@ -20,11 +21,13 @@ RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
-# Copy the binary from the builder stage
-COPY --from=builder /app/ghwebhook .
+# Copy the binaries from the builder stage
+COPY --from=builder /bin/ghwebhook .
+COPY --from=builder /bin/prober .
 
 # Expose ports
 EXPOSE 8080 50051
 
 # Run the binary
 CMD ["./ghwebhook"]
+
