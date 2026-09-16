@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -794,5 +797,91 @@ func TestUnregister_gRPCIntegration(t *testing.T) {
 	}
 }
 
+type mockPStoreClient struct {
+	pstore_client.PStoreClient
+	writeFunc func(ctx context.Context, req *pstore_pb.WriteRequest) (*pstore_pb.WriteResponse, error)
+}
 
+func (m *mockPStoreClient) Write(ctx context.Context, req *pstore_pb.WriteRequest) (*pstore_pb.WriteResponse, error) {
+	if m.writeFunc != nil {
+		return m.writeFunc(ctx, req)
+	}
+	return m.PStoreClient.Write(ctx, req)
+}
 
+func TestRegister_PersistenceFailure_LogsError(t *testing.T) {
+	expectedErr := errors.New("simulated pstore write failure")
+	mockPS := &mockPStoreClient{
+		PStoreClient: pstore_client.GetTestClient(),
+		writeFunc: func(ctx context.Context, req *pstore_pb.WriteRequest) (*pstore_pb.WriteResponse, error) {
+			return nil, expectedErr
+		},
+	}
+	s := NewServer(mockPS)
+
+	var buf bytes.Buffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	req := &pb.RegistrationRequest{
+		RepoFullName:   "brotherlogic/ghwebhook",
+		ServiceAddress: "127.0.0.1:50051",
+	}
+
+	resp, err := s.Register(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Register returned unexpected error: %v", err)
+	}
+
+	if resp.Success {
+		t.Errorf("Expected resp.Success to be false, got true")
+	}
+
+	if !strings.Contains(resp.Message, expectedErr.Error()) {
+		t.Errorf("Expected resp.Message to contain %q, got %q", expectedErr.Error(), resp.Message)
+	}
+
+	logOutput := buf.String()
+	expectedLogFragment := fmt.Sprintf("Registration failed for %s at %s: persistence error: %v", req.RepoFullName, req.ServiceAddress, expectedErr)
+	if !strings.Contains(logOutput, expectedLogFragment) {
+		t.Errorf("Expected log output to contain %q, got %q", expectedLogFragment, logOutput)
+	}
+}
+
+func TestRegister_Success_Quiet(t *testing.T) {
+	s := NewServer(pstore_client.GetTestClient())
+
+	var buf bytes.Buffer
+	origOutput := log.Writer()
+	origFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOutput)
+		log.SetFlags(origFlags)
+	}()
+
+	req := &pb.RegistrationRequest{
+		RepoFullName:   "brotherlogic/ghwebhook",
+		ServiceAddress: "127.0.0.1:50051",
+	}
+
+	resp, err := s.Register(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	if !resp.Success {
+		t.Errorf("Expected resp.Success to be true, got false: %s", resp.Message)
+	}
+
+	if buf.Len() != 0 {
+		t.Errorf("Expected quiet log output on success, got: %q", buf.String())
+	}
+}
