@@ -229,14 +229,34 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		RepoFullName:   p.repoFullName,
 		ServiceAddress: serviceAddr,
 	})
-	if err != nil || (regResp != nil && !regResp.GetSuccess()) {
-		if err == nil {
-			err = errors.New("registration rejected by ghwebhook")
-		}
+	if err != nil {
+		err = fmt.Errorf("registration transport error for %s (%s): %w", p.repoFullName, serviceAddr, err)
 		return Result{
 			Status:   StatusHardFailure,
 			Duration: time.Since(startTime),
-			Message:  fmt.Sprintf("failed to register with ghwebhook: %v", err),
+			Message:  err.Error(),
+			Err:      err,
+		}, err
+	}
+	if regResp == nil {
+		err = fmt.Errorf("unexpected nil registration response from ghwebhook for %s (%s)", p.repoFullName, serviceAddr)
+		return Result{
+			Status:   StatusHardFailure,
+			Duration: time.Since(startTime),
+			Message:  err.Error(),
+			Err:      err,
+		}, err
+	}
+	if !regResp.GetSuccess() {
+		msg := strings.TrimSpace(regResp.GetMessage())
+		if msg == "" {
+			msg = "registration rejected by ghwebhook without specific error message"
+		}
+		err = fmt.Errorf("registration rejected by ghwebhook for %s (%s): %s", p.repoFullName, serviceAddr, msg)
+		return Result{
+			Status:   StatusHardFailure,
+			Duration: time.Since(startTime),
+			Message:  err.Error(),
 			Err:      err,
 		}, err
 	}
