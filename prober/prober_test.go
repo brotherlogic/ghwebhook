@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -748,5 +749,140 @@ func TestProber_CleanupResilience(t *testing.T) {
 	}
 	if closedIssueNumber != issueNumber {
 		t.Errorf("closedIssueNumber = %d, want %d (cleanup must close opened issue)", closedIssueNumber, issueNumber)
+	}
+}
+
+func TestProber_RegistrationTransportError(t *testing.T) {
+	transportErr := errors.New("connection refused: dial tcp 127.0.0.1:50051")
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return nil, transportErr
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:50000"),
+		WithRegistrationClient(regClient),
+	)
+
+	res, err := p.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Run, got nil")
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	expectedPrefix := "registration transport error for brotherlogic/ghwebhook (127.0.0.1:50000):"
+	if !strings.Contains(res.Message, expectedPrefix) {
+		t.Errorf("res.Message = %q, want substring %q", res.Message, expectedPrefix)
+	}
+	if !strings.Contains(res.Message, "connection refused") {
+		t.Errorf("res.Message = %q, want underlying transport error", res.Message)
+	}
+	if !errors.Is(err, transportErr) {
+		t.Errorf("errors.Is(err, transportErr) = false, want true (error should wrap transport error)")
+	}
+}
+
+func TestProber_RegistrationRejection(t *testing.T) {
+	rejectionReason := "pstore unavailable"
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{
+				Success: false,
+				Message: rejectionReason,
+			}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:50000"),
+		WithRegistrationClient(regClient),
+	)
+
+	res, err := p.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Run, got nil")
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	expectedMsg := "registration rejected by ghwebhook for brotherlogic/ghwebhook (127.0.0.1:50000): pstore unavailable"
+	if res.Message != expectedMsg {
+		t.Errorf("res.Message = %q, want %q", res.Message, expectedMsg)
+	}
+	if err.Error() != expectedMsg {
+		t.Errorf("err.Error() = %q, want %q", err.Error(), expectedMsg)
+	}
+}
+
+func TestProber_RegistrationRejection_EmptyMessage(t *testing.T) {
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{
+				Success: false,
+				Message: "   ",
+			}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:50000"),
+		WithRegistrationClient(regClient),
+	)
+
+	res, err := p.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Run, got nil")
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	expectedMsg := "registration rejected by ghwebhook for brotherlogic/ghwebhook (127.0.0.1:50000): registration rejected by ghwebhook without specific error message"
+	if res.Message != expectedMsg {
+		t.Errorf("res.Message = %q, want %q", res.Message, expectedMsg)
+	}
+	if err.Error() != expectedMsg {
+		t.Errorf("err.Error() = %q, want %q", err.Error(), expectedMsg)
+	}
+}
+
+func TestProber_RegistrationNilResponse(t *testing.T) {
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return nil, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:50000"),
+		WithRegistrationClient(regClient),
+	)
+
+	res, err := p.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected error from Run, got nil")
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	expectedMsg := "unexpected nil registration response from ghwebhook for brotherlogic/ghwebhook (127.0.0.1:50000)"
+	if res.Message != expectedMsg {
+		t.Errorf("res.Message = %q, want %q", res.Message, expectedMsg)
+	}
+	if err.Error() != expectedMsg {
+		t.Errorf("err.Error() = %q, want %q", err.Error(), expectedMsg)
 	}
 }
