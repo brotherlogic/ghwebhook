@@ -84,6 +84,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb
 
 	val, err := anypb.New(req)
 	if err != nil {
+		log.Printf("Registration failed for %s at %s: marshaling error: %v", req.RepoFullName, req.ServiceAddress, err)
 		return &pb.RegistrationResponse{Success: false, Message: err.Error()}, nil
 	}
 
@@ -92,6 +93,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb
 		Value: val,
 	})
 	if err != nil {
+		log.Printf("Registration failed for %s at %s: persistence error: %v", req.RepoFullName, req.ServiceAddress, err)
 		return &pb.RegistrationResponse{Success: false, Message: err.Error()}, nil
 	}
 
