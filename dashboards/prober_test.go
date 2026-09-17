@@ -10,6 +10,7 @@ import (
 type Dashboard struct {
 	Title      string     `json:"title"`
 	UID        string     `json:"uid"`
+	Timezone   string     `json:"timezone"`
 	Templating Templating `json:"templating"`
 	Panels     []Panel    `json:"panels"`
 }
@@ -117,6 +118,13 @@ func TestProberDashboard_ValidJSON(t *testing.T) {
 	}
 	if d.UID == "" {
 		t.Errorf("expected non-empty dashboard UID, got empty")
+	}
+}
+
+func TestProberDashboard_Timezone(t *testing.T) {
+	d := loadDashboard(t)
+	if d.Timezone != "browser" {
+		t.Errorf("expected dashboard timezone to be 'browser', got %q", d.Timezone)
 	}
 }
 

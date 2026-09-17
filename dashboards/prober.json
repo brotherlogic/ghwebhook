@@ -665,7 +665,7 @@
       "1d"
     ]
   },
-  "timezone": "utc",
+  "timezone": "browser",
   "title": "GHWebhook Prober Observability",
   "uid": "ghwebhook-prober",
   "version": 1
