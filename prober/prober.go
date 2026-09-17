@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -376,6 +377,12 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 			Message:     fmt.Sprintf("successfully received and validated webhook for issue #%d (%s)", targetIssueNumber, targetAction),
 		}, nil
 	case <-timer.C:
+		var diagnostics *InspectionDiagnostics
+		if ctx.Err() == nil {
+			inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer inspectCancel()
+			diagnostics = p.inspectWebhooks(inspectCtx, owner, repo, startTime, targetAction)
+		}
 		return Result{
 			Status:      StatusHardFailure,
 			Duration:    time.Since(startTime),
@@ -383,6 +390,7 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 			Action:      targetAction,
 			Message:     fmt.Sprintf("timed out waiting for webhook event after %v", p.timeout),
 			Err:         errors.New("timeout waiting for webhook event"),
+			Diagnostics: diagnostics,
 		}, nil
 	case <-ctx.Done():
 		return Result{
@@ -395,3 +403,123 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		}, ctx.Err()
 	}
 }
+
+func (p *Prober) inspectWebhooks(ctx context.Context, owner, repo string, startTime time.Time, action string) *InspectionDiagnostics {
+	hookClient := p.HookClient()
+	if hookClient == nil {
+		hookClient = NewDefaultGitHubHookClient("")
+	}
+
+	hooks, err := hookClient.ListHooks(ctx, owner, repo, nil)
+	if err != nil {
+		var errResp *github.ErrorResponse
+		if (errors.As(err, &errResp) && errResp.Response != nil && (errResp.Response.StatusCode == http.StatusForbidden || errResp.Response.StatusCode == http.StatusNotFound)) ||
+			strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") {
+			return &InspectionDiagnostics{
+				RootCause:       RootCauseInspectionUnavailable,
+				RootCauseDetail: "insufficient token permissions to inspect repository webhooks (admin:repo_hook required)",
+				ErrorMessage:    err.Error(),
+			}
+		}
+		return &InspectionDiagnostics{
+			RootCause:       RootCauseInspectionUnavailable,
+			RootCauseDetail: fmt.Sprintf("failed to list repository webhooks: %v", err),
+			ErrorMessage:    err.Error(),
+		}
+	}
+
+	var activeHooks []*github.Hook
+	for _, hook := range hooks {
+		if hook == nil || !hook.GetActive() {
+			continue
+		}
+		listensToIssues := false
+		for _, ev := range hook.Events {
+			if ev == "issues" || ev == "*" {
+				listensToIssues = true
+				break
+			}
+		}
+		if listensToIssues {
+			activeHooks = append(activeHooks, hook)
+		}
+	}
+
+	if len(activeHooks) == 0 {
+		return &InspectionDiagnostics{
+			RootCause:        RootCauseWebhookMissing,
+			RootCauseDetail:  "no active webhook configured for issue events found on repository",
+			ActiveHooksCount: 0,
+		}
+	}
+
+	cutoff := startTime.Add(-5 * time.Second)
+	var matchingDeliveries []HookDeliverySummary
+
+	for _, hook := range activeHooks {
+		deliveries, err := hookClient.ListHookDeliveries(ctx, owner, repo, hook.GetID(), nil)
+		if err != nil {
+			continue
+		}
+		for _, d := range deliveries {
+			if d == nil {
+				continue
+			}
+			deliveredAt := d.GetDeliveredAt().Time
+			if deliveredAt.Before(cutoff) {
+				continue
+			}
+			if d.GetEvent() != "issues" || d.GetAction() != action {
+				continue
+			}
+
+			var dur float64
+			if d.Duration != nil {
+				dur = *d.Duration
+			}
+			matchingDeliveries = append(matchingDeliveries, HookDeliverySummary{
+				HookID:      hook.GetID(),
+				DeliveryID:  d.GetID(),
+				GUID:        d.GetGUID(),
+				DeliveredAt: deliveredAt,
+				StatusCode:  d.GetStatusCode(),
+				Status:      d.GetStatus(),
+				Duration:    dur,
+				Event:       d.GetEvent(),
+				Action:      d.GetAction(),
+			})
+		}
+	}
+
+	sort.Slice(matchingDeliveries, func(i, j int) bool {
+		return matchingDeliveries[i].DeliveredAt.After(matchingDeliveries[j].DeliveredAt)
+	})
+
+	if len(matchingDeliveries) == 0 {
+		return &InspectionDiagnostics{
+			RootCause:          RootCauseNoDeliveryAttempted,
+			RootCauseDetail:    "active webhook exists but no delivery attempt was recorded for this event within the test window",
+			ActiveHooksCount:   len(activeHooks),
+			MatchingDeliveries: matchingDeliveries,
+		}
+	}
+
+	mostRecent := matchingDeliveries[0]
+	if mostRecent.StatusCode >= 200 && mostRecent.StatusCode < 300 {
+		return &InspectionDiagnostics{
+			RootCause:          RootCauseLostInRouting,
+			RootCauseDetail:    fmt.Sprintf("webhook delivered by GitHub (HTTP %d) but was not received or processed by prober handler", mostRecent.StatusCode),
+			ActiveHooksCount:   len(activeHooks),
+			MatchingDeliveries: matchingDeliveries,
+		}
+	}
+
+	return &InspectionDiagnostics{
+		RootCause:          RootCauseDeliveryFailed,
+		RootCauseDetail:    fmt.Sprintf("webhook delivery failed with HTTP status %d: %s", mostRecent.StatusCode, mostRecent.Status),
+		ActiveHooksCount:   len(activeHooks),
+		MatchingDeliveries: matchingDeliveries,
+	}
+}
+
+

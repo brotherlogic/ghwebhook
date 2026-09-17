@@ -1062,3 +1062,402 @@ func TestProber_HardFailure_GitHub422(t *testing.T) {
 		}
 	})
 }
+
+func TestInspectWebhooks_WebhookMissing(t *testing.T) {
+	hookID := int64(100)
+	active := true
+	inactive := false
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &inactive,
+					Events: []string{"issues"},
+				},
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"push", "pull_request"},
+				},
+			}, nil
+		},
+	}
+
+	p := NewProber(WithHookClient(hookClient))
+	diag := p.inspectWebhooks(context.Background(), "owner", "repo", time.Now(), "opened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseWebhookMissing {
+		t.Errorf("expected RootCause %q, got %q", RootCauseWebhookMissing, diag.RootCause)
+	}
+	if diag.ActiveHooksCount != 0 {
+		t.Errorf("expected ActiveHooksCount 0, got %d", diag.ActiveHooksCount)
+	}
+}
+
+func TestInspectWebhooks_DeliveryFailed(t *testing.T) {
+	hookID := int64(101)
+	deliveryID := int64(201)
+	active := true
+	now := time.Now()
+	guid := "delivery-guid-fail"
+	event := "issues"
+	action := "opened"
+	status := "failed"
+	statusCode := 502
+	duration := 0.25
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"issues"},
+				},
+			}, nil
+		},
+		ListHookDeliveriesFunc: func(ctx context.Context, owner, repo string, hID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+			return []*github.HookDelivery{
+				{
+					ID:          &deliveryID,
+					GUID:        &guid,
+					DeliveredAt: &github.Timestamp{Time: now.Add(1 * time.Second)},
+					Duration:    &duration,
+					Status:      &status,
+					StatusCode:  &statusCode,
+					Event:       &event,
+					Action:      &action,
+				},
+			}, nil
+		},
+	}
+
+	p := NewProber(WithHookClient(hookClient))
+	diag := p.inspectWebhooks(context.Background(), "owner", "repo", now, "opened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseDeliveryFailed {
+		t.Errorf("expected RootCause %q, got %q", RootCauseDeliveryFailed, diag.RootCause)
+	}
+	if diag.ActiveHooksCount != 1 {
+		t.Errorf("expected ActiveHooksCount 1, got %d", diag.ActiveHooksCount)
+	}
+	if len(diag.MatchingDeliveries) != 1 {
+		t.Fatalf("expected 1 matching delivery, got %d", len(diag.MatchingDeliveries))
+	}
+	if diag.MatchingDeliveries[0].StatusCode != 502 {
+		t.Errorf("expected status code 502, got %d", diag.MatchingDeliveries[0].StatusCode)
+	}
+}
+
+func TestInspectWebhooks_LostInRouting(t *testing.T) {
+	hookID := int64(102)
+	deliveryID := int64(202)
+	active := true
+	now := time.Now()
+	guid := "delivery-guid-ok"
+	event := "issues"
+	action := "reopened"
+	status := "OK"
+	statusCode := 200
+	duration := 0.12
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"*"},
+				},
+			}, nil
+		},
+		ListHookDeliveriesFunc: func(ctx context.Context, owner, repo string, hID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+			return []*github.HookDelivery{
+				{
+					ID:          &deliveryID,
+					GUID:        &guid,
+					DeliveredAt: &github.Timestamp{Time: now.Add(2 * time.Second)},
+					Duration:    &duration,
+					Status:      &status,
+					StatusCode:  &statusCode,
+					Event:       &event,
+					Action:      &action,
+				},
+			}, nil
+		},
+	}
+
+	p := NewProber(WithHookClient(hookClient))
+	diag := p.inspectWebhooks(context.Background(), "owner", "repo", now, "reopened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseLostInRouting {
+		t.Errorf("expected RootCause %q, got %q", RootCauseLostInRouting, diag.RootCause)
+	}
+	if diag.ActiveHooksCount != 1 {
+		t.Errorf("expected ActiveHooksCount 1, got %d", diag.ActiveHooksCount)
+	}
+	if len(diag.MatchingDeliveries) != 1 {
+		t.Fatalf("expected 1 matching delivery, got %d", len(diag.MatchingDeliveries))
+	}
+	if diag.MatchingDeliveries[0].StatusCode != 200 {
+		t.Errorf("expected status code 200, got %d", diag.MatchingDeliveries[0].StatusCode)
+	}
+}
+
+func TestInspectWebhooks_NoDeliveryAttempted(t *testing.T) {
+	hookID := int64(103)
+	deliveryID := int64(203)
+	active := true
+	now := time.Now()
+	guid := "delivery-guid-old"
+	event := "issues"
+	diffAction := "closed"
+	status := "OK"
+	statusCode := 200
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"issues"},
+				},
+			}, nil
+		},
+		ListHookDeliveriesFunc: func(ctx context.Context, owner, repo string, hID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+			return []*github.HookDelivery{
+				// Delivery with different action
+				{
+					ID:          &deliveryID,
+					GUID:        &guid,
+					DeliveredAt: &github.Timestamp{Time: now.Add(1 * time.Second)},
+					Status:      &status,
+					StatusCode:  &statusCode,
+					Event:       &event,
+					Action:      &diffAction,
+				},
+				// Delivery before cutoff (skew tolerance is 5s)
+				{
+					ID:          &deliveryID,
+					GUID:        &guid,
+					DeliveredAt: &github.Timestamp{Time: now.Add(-10 * time.Second)},
+					Status:      &status,
+					StatusCode:  &statusCode,
+					Event:       &event,
+					Action:      github.Ptr("opened"),
+				},
+			}, nil
+		},
+	}
+
+	p := NewProber(WithHookClient(hookClient))
+	diag := p.inspectWebhooks(context.Background(), "owner", "repo", now, "opened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseNoDeliveryAttempted {
+		t.Errorf("expected RootCause %q, got %q", RootCauseNoDeliveryAttempted, diag.RootCause)
+	}
+	if diag.ActiveHooksCount != 1 {
+		t.Errorf("expected ActiveHooksCount 1, got %d", diag.ActiveHooksCount)
+	}
+	if len(diag.MatchingDeliveries) != 0 {
+		t.Errorf("expected 0 matching deliveries, got %d", len(diag.MatchingDeliveries))
+	}
+}
+
+func TestInspectWebhooks_InspectionUnavailable_Permissions(t *testing.T) {
+	for _, code := range []int{403, 404} {
+		t.Run(fmt.Sprintf("HTTP %d", code), func(t *testing.T) {
+			hookClient := &MockGitHubHookClient{
+				ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+					return nil, &github.ErrorResponse{
+						Response: &http.Response{StatusCode: code},
+						Message:  "Must have admin rights to Repository",
+					}
+				},
+			}
+
+			p := NewProber(WithHookClient(hookClient))
+			diag := p.inspectWebhooks(context.Background(), "owner", "repo", time.Now(), "opened")
+			if diag == nil {
+				t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+			}
+			if diag.RootCause != RootCauseInspectionUnavailable {
+				t.Errorf("expected RootCause %q, got %q", RootCauseInspectionUnavailable, diag.RootCause)
+			}
+			if !strings.Contains(strings.ToLower(diag.RootCauseDetail), "permissions") && !strings.Contains(strings.ToLower(diag.RootCauseDetail), "admin:repo_hook") {
+				t.Errorf("expected permission notice in RootCauseDetail, got %q", diag.RootCauseDetail)
+			}
+		})
+	}
+}
+
+func TestInspectWebhooks_InspectionUnavailable_GenericError(t *testing.T) {
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return nil, errors.New("500 Internal Server Error")
+		},
+	}
+
+	p := NewProber(WithHookClient(hookClient))
+	diag := p.inspectWebhooks(context.Background(), "owner", "repo", time.Now(), "opened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseInspectionUnavailable {
+		t.Errorf("expected RootCause %q, got %q", RootCauseInspectionUnavailable, diag.RootCause)
+	}
+}
+
+func TestInspectWebhooks_NilHookClient_Fallback(t *testing.T) {
+	p := NewProber() // hookClient is nil
+	// Calling inspectWebhooks with a canceled context should not panic and should handle error gracefully
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	diag := p.inspectWebhooks(ctx, "owner", "repo", time.Now(), "opened")
+	if diag == nil {
+		t.Fatal("expected non-nil InspectionDiagnostics, got nil")
+	}
+	if diag.RootCause != RootCauseInspectionUnavailable {
+		t.Errorf("expected RootCause %q, got %q", RootCauseInspectionUnavailable, diag.RootCause)
+	}
+}
+
+func TestProber_Run_Timeout_WithInspectionDiagnostics(t *testing.T) {
+	hookID := int64(888)
+	deliveryID := int64(999)
+	active := true
+	now := time.Now()
+	guid := "delivery-run-guid"
+	event := "issues"
+	action := "closed"
+	status := "OK"
+	statusCode := 200
+	duration := 0.05
+
+	regClient := &mockRegistrationServiceClient{}
+	ghClient := &MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			num := 42
+			state := "open"
+			title := "PROBER TEST"
+			return []*github.Issue{{
+				Number: &num,
+				State:  &state,
+				Title:  &title,
+			}}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := req.GetState()
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{{
+				ID:     &hookID,
+				Active: &active,
+				Events: []string{"issues"},
+			}}, nil
+		},
+		ListHookDeliveriesFunc: func(ctx context.Context, owner, repo string, hID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+			return []*github.HookDelivery{{
+				ID:          &deliveryID,
+				GUID:        &guid,
+				DeliveredAt: &github.Timestamp{Time: now.Add(100 * time.Millisecond)},
+				Duration:    &duration,
+				Status:      &status,
+				StatusCode:  &statusCode,
+				Event:       &event,
+				Action:      &action,
+			}}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithTimeout(100*time.Millisecond),
+		WithRegistrationClient(regClient),
+		WithGitHubClient(ghClient),
+		WithHookClient(hookClient),
+	)
+
+	res, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("expected nil error on timeout from Run, got %v", err)
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("expected StatusHardFailure, got %v", res.Status)
+	}
+	if res.Diagnostics == nil {
+		t.Fatal("expected non-nil Diagnostics on timeout, got nil")
+	}
+	if res.Diagnostics.RootCause != RootCauseLostInRouting {
+		t.Errorf("expected RootCause %q, got %q", RootCauseLostInRouting, res.Diagnostics.RootCause)
+	}
+}
+
+func TestProber_Run_ContextCancelled_SkipsInspection(t *testing.T) {
+	regClient := &mockRegistrationServiceClient{}
+	ghClient := &MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			num := 42
+			state := "open"
+			title := "PROBER TEST"
+			return []*github.Issue{{
+				Number: &num,
+				State:  &state,
+				Title:  &title,
+			}}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := req.GetState()
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+	hookClientCalled := false
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			hookClientCalled = true
+			return []*github.Hook{}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithTimeout(5*time.Second),
+		WithRegistrationClient(regClient),
+		WithGitHubClient(ghClient),
+		WithHookClient(hookClient),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	res, err := p.Run(ctx)
+	if err == nil {
+		t.Fatal("expected context cancelled error, got nil")
+	}
+	if hookClientCalled {
+		t.Error("expected hookClient NOT to be called when context is cancelled")
+	}
+	if res.Diagnostics != nil {
+		t.Errorf("expected nil Diagnostics when context is cancelled, got %v", res.Diagnostics)
+	}
+}
+
