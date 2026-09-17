@@ -23,6 +23,7 @@ const (
 var (
 	recordResultFunc             = prober.RecordResult
 	serveMetricsUntilScrapedFunc = prober.ServeMetricsUntilScraped
+	newDefaultGitHubHookClient   = prober.NewDefaultGitHubHookClient
 )
 
 // Config encapsulates configuration parameters for the prober CLI.
@@ -225,7 +226,9 @@ func run(ctx context.Context, cfg *Config, p *prober.Prober, ghClient prober.Git
 // runWithProber constructs a Prober from Config and executes it.
 func runWithProber(ctx context.Context, cfg *Config, stdout, stderr io.Writer, extraOpts ...prober.Option) int {
 	ghClient := prober.NewDefaultGitHubIssueClient(cfg.GitHubToken)
-	return runWithProberAndClient(ctx, cfg, ghClient, stdout, stderr, extraOpts...)
+	hookClient := newDefaultGitHubHookClient(cfg.GitHubToken)
+	opts := append([]prober.Option{prober.WithHookClient(hookClient)}, extraOpts...)
+	return runWithProberAndClient(ctx, cfg, ghClient, stdout, stderr, opts...)
 }
 
 // runWithProberAndClient constructs a Prober from Config and an explicit GitHubIssueClient.
