@@ -97,3 +97,69 @@ func (m *MockGitHubIssueClient) EditIssue(ctx context.Context, owner, repo strin
 	}
 	return nil, nil
 }
+
+// GitHubHookClient defines the interface for interacting with GitHub repository webhooks and deliveries.
+type GitHubHookClient interface {
+	ListHooks(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error)
+	ListHookDeliveries(ctx context.Context, owner, repo string, hookID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error)
+}
+
+type defaultGitHubHookClient struct {
+	client *github.Client
+}
+
+// NewDefaultGitHubHookClient creates a GitHubHookClient authenticated with the given token.
+// If token is empty, it attempts to resolve the token from GH_TOKEN or GITHUB_TOKEN environment variables.
+func NewDefaultGitHubHookClient(token string) GitHubHookClient {
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+		if token == "" {
+			token = os.Getenv("GITHUB_TOKEN")
+		}
+	}
+
+	var client *github.Client
+	if token != "" {
+		client = github.NewClient(nil).WithAuthToken(token)
+	} else {
+		client = github.NewClient(nil)
+	}
+
+	return &defaultGitHubHookClient{client: client}
+}
+
+// NewGitHubHookClientFromClient creates a GitHubHookClient wrapping an existing *github.Client.
+func NewGitHubHookClientFromClient(client *github.Client) GitHubHookClient {
+	return &defaultGitHubHookClient{client: client}
+}
+
+func (d *defaultGitHubHookClient) ListHooks(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+	hooks, _, err := d.client.Repositories.ListHooks(ctx, owner, repo, opts)
+	return hooks, err
+}
+
+func (d *defaultGitHubHookClient) ListHookDeliveries(ctx context.Context, owner, repo string, hookID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+	deliveries, _, err := d.client.Repositories.ListHookDeliveries(ctx, owner, repo, hookID, opts)
+	return deliveries, err
+}
+
+// MockGitHubHookClient is a configurable mock implementation of GitHubHookClient for unit testing.
+type MockGitHubHookClient struct {
+	ListHooksFunc          func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error)
+	ListHookDeliveriesFunc func(ctx context.Context, owner, repo string, hookID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error)
+}
+
+func (m *MockGitHubHookClient) ListHooks(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+	if m.ListHooksFunc != nil {
+		return m.ListHooksFunc(ctx, owner, repo, opts)
+	}
+	return nil, nil
+}
+
+func (m *MockGitHubHookClient) ListHookDeliveries(ctx context.Context, owner, repo string, hookID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+	if m.ListHookDeliveriesFunc != nil {
+		return m.ListHookDeliveriesFunc(ctx, owner, repo, hookID, opts)
+	}
+	return nil, nil
+}
+
