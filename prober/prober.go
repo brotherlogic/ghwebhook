@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -62,6 +63,30 @@ func (p *Prober) StopGRPCServer() {
 		_ = p.listener.Close()
 		p.listener = nil
 	}
+}
+
+// isGitHub422 returns true if the error represents an HTTP 422 Unprocessable Entity from GitHub API.
+func isGitHub422(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errResp *github.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == http.StatusUnprocessableEntity {
+		return true
+	}
+	if strings.Contains(err.Error(), "422") {
+		return true
+	}
+	return false
+}
+
+// classifyGitHubError maps a GitHub API error to either StatusHardFailure (for client 422 errors)
+// or StatusSoftFailure (for transient server/network/rate-limit errors).
+func classifyGitHubError(err error) ResultStatus {
+	if isGitHub422(err) {
+		return StatusHardFailure
+	}
+	return StatusSoftFailure
 }
 
 // ReceiveWebhook handles incoming WebhookEvent RPCs from ghwebhook.
@@ -270,7 +295,7 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 	issues, err := p.ghClient.SearchIssues(ctx, owner, repo, p.targetTitle)
 	if err != nil {
 		return Result{
-			Status:   StatusSoftFailure,
+			Status:   classifyGitHubError(err),
 			Duration: time.Since(startTime),
 			Message:  fmt.Sprintf("failed to search issues on GitHub: %v", err),
 			Err:      err,
@@ -294,7 +319,7 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		})
 		if err != nil {
 			return Result{
-				Status:   StatusSoftFailure,
+				Status:   classifyGitHubError(err),
 				Duration: time.Since(startTime),
 				Message:  fmt.Sprintf("failed to create test issue on GitHub: %v", err),
 				Err:      err,
@@ -310,7 +335,7 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		})
 		if err != nil {
 			return Result{
-				Status:   StatusSoftFailure,
+				Status:   classifyGitHubError(err),
 				Duration: time.Since(startTime),
 				Message:  fmt.Sprintf("failed to reopen test issue on GitHub: %v", err),
 				Err:      err,
@@ -325,7 +350,7 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		})
 		if err != nil {
 			return Result{
-				Status:   StatusSoftFailure,
+				Status:   classifyGitHubError(err),
 				Duration: time.Since(startTime),
 				Message:  fmt.Sprintf("failed to close test issue on GitHub: %v", err),
 				Err:      err,

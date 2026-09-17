@@ -47,8 +47,11 @@ func NewGitHubIssueClientFromClient(client *github.Client) GitHubIssueClient {
 
 func (d *defaultGitHubIssueClient) SearchIssues(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
 	q := query
-	if owner != "" && repo != "" && !strings.Contains(query, "repo:") {
-		q = fmt.Sprintf("repo:%s/%s %s", owner, repo, query)
+	if !strings.Contains(q, "is:issue") && !strings.Contains(q, "is:pull-request") {
+		q = "is:issue " + q
+	}
+	if owner != "" && repo != "" && !strings.Contains(q, "repo:") {
+		q = fmt.Sprintf("repo:%s/%s %s", owner, repo, q)
 	}
 	result, _, err := d.client.Search.Issues(ctx, q, nil)
 	if err != nil {
