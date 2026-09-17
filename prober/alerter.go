@@ -75,6 +75,11 @@ func HandleHardFailure(ctx context.Context, client GitHubIssueClient, repoFullNa
 	}, nil
 }
 
+// BuildDiagnosticReport generates the formatted Markdown diagnostic report for a prober run result.
+func BuildDiagnosticReport(repoFullName string, res Result) string {
+	return buildDiagnosticReport(repoFullName, res)
+}
+
 func buildDiagnosticReport(repoFullName string, res Result) string {
 	timestampUTC := time.Now().UTC().Format(time.RFC3339)
 
@@ -95,7 +100,8 @@ func buildDiagnosticReport(repoFullName string, res Result) string {
 		errMsg = "Hard failure encountered during webhook delivery or validation"
 	}
 
-	return fmt.Sprintf(`## 🚨 Prober Hard Failure Alert
+	if res.Diagnostics == nil {
+		return fmt.Sprintf(`## 🚨 Prober Hard Failure Alert
 
 The automated prober encountered a hard failure while verifying webhook delivery and validation.
 
@@ -119,4 +125,97 @@ The automated prober encountered a hard failure while verifying webhook delivery
 4. **Network & DNS:** Verify internal DNS resolution and firewall rules between ghwebhook and registered services.
 5. **Resolution:** After identifying and fixing the underlying failure, run the prober again or close this alert issue.
 `, timestampUTC, repoFullName, res.Duration.String(), issueInfo, action, res.Status.String(), errMsg)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## 🚨 Prober Hard Failure Alert\n\n")
+	sb.WriteString("The automated prober encountered a hard failure while verifying webhook delivery and validation.\n\n")
+	sb.WriteString("### Diagnostic Report\n\n")
+	sb.WriteString(fmt.Sprintf("- **Timestamp:** %s (UTC)\n", timestampUTC))
+	sb.WriteString(fmt.Sprintf("- **Target Repository:** %s\n", repoFullName))
+	sb.WriteString(fmt.Sprintf("- **Probe Execution Duration:** %s\n", res.Duration.String()))
+	sb.WriteString(fmt.Sprintf("- **Triggered Test Issue:** %s (Action: %s)\n", issueInfo, action))
+	sb.WriteString(fmt.Sprintf("- **Status:** %s\n", res.Status.String()))
+	sb.WriteString(fmt.Sprintf("- **Root Cause:** %s\n", string(res.Diagnostics.RootCause)))
+	sb.WriteString("- **Failure Details:**\n```\n")
+	sb.WriteString(errMsg)
+	sb.WriteString("\n```\n\n")
+
+	sb.WriteString(fmt.Sprintf("### Root Cause: %s\n\n", string(res.Diagnostics.RootCause)))
+	if res.Diagnostics.RootCauseDetail != "" {
+		sb.WriteString(fmt.Sprintf("%s\n\n", res.Diagnostics.RootCauseDetail))
+	}
+	if res.Diagnostics.RootCause == RootCauseInspectionUnavailable {
+		sb.WriteString("> ⚠️ **Warning:** Missing `admin:repo_hook` token permissions; delivery inspection could not be completed.\n\n")
+		if res.Diagnostics.ErrorMessage != "" {
+			sb.WriteString(fmt.Sprintf("- **Inspection Error:** `%s`\n\n", res.Diagnostics.ErrorMessage))
+		}
+	}
+
+	if len(res.Diagnostics.MatchingDeliveries) > 0 {
+		sb.WriteString("### Webhook Deliveries\n\n")
+		sb.WriteString("| Hook ID | Delivery GUID | Delivered At | HTTP Status | Status Message | Duration |\n")
+		sb.WriteString("|---------|---------------|--------------|-------------|----------------|----------|\n")
+		for _, d := range res.Diagnostics.MatchingDeliveries {
+			deliveredAtStr := "N/A"
+			if !d.DeliveredAt.IsZero() {
+				deliveredAtStr = d.DeliveredAt.UTC().Format(time.RFC3339)
+			}
+			statusMsg := d.Status
+			if statusMsg == "" {
+				statusMsg = "N/A"
+			}
+			guid := d.GUID
+			if guid == "" {
+				guid = "N/A"
+			}
+			sb.WriteString(fmt.Sprintf("| %d | %s | %s | %d | %s | %.3fs |\n",
+				d.HookID, guid, deliveredAtStr, d.StatusCode, statusMsg, d.Duration))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("### Operator Troubleshooting Steps\n\n")
+	sb.WriteString(renderTroubleshootingGuidance(res.Diagnostics.RootCause))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+func renderTroubleshootingGuidance(rc RootCause) string {
+	switch rc {
+	case RootCauseWebhookMissing:
+		return `1. **Verify Repository Webhook Configuration:** Check repository settings to verify repository webhook configuration for ` + "`issues`" + ` events targeting the ingress endpoint.
+2. **Check Webhook Secret:** Verify that the repository webhook secret matches the proxy's expected secret.
+3. **Verify Service Health:** Verify if ghwebhook is healthy and accessible at its configured endpoint.`
+
+	case RootCauseDeliveryFailed:
+		return `1. **Check Ingress Routing & Gateway Logs:** Check ingress routing and ingress gateway logs for delivery failures or dropped connections.
+2. **Verify TLS Certificates & Firewall:** Check TLS certificates validity and firewall rules to ensure GitHub webhook traffic can reach the endpoint.
+3. **Inspect Server Logs:** Check ghwebhook container logs for HTTP error responses or connection reset errors.`
+
+	case RootCauseLostInRouting:
+		return `1. **Check Proxy HMAC Verification:** Check proxy HMAC verification (` + "`X-Hub-Signature-256`" + `) is succeeding on incoming requests.
+2. **Check gRPC Handler Connectivity:** Check gRPC handler connectivity between the proxy and handler services.
+3. **Verify Service Registration:** Check service registration status to ensure the repository is actively registered in pstore.`
+
+	case RootCauseNoDeliveryAttempted:
+		return `1. **Check Upstream GitHub Event Processing Status:** Check upstream GitHub event processing status and repository webhook recent delivery tabs for event delays or outages.
+2. **Verify Event Trigger:** Ensure the test issue action was properly dispatched and eligible to trigger webhook events.
+3. **Inspect Active Webhook Filters:** Verify that active webhooks on the repository are configured to listen to ` + "`issues`" + ` events.`
+
+	case RootCauseInspectionUnavailable:
+		return `1. **Verify Token Permissions:** Ensure prober token has ` + "`admin:repo_hook`" + ` token permissions to inspect webhook deliveries.
+2. **Check Service Health:** Verify if ghwebhook is healthy and accessible at its configured endpoint.
+3. **Review GitHub Webhook Deliveries:** In GitHub repository settings, check the Webhooks delivery log for recent failures, HTTP response codes, or timeouts.
+4. **Inspect Server Logs:** Check ghwebhook container logs for HMAC validation failures or gRPC forwarding errors.
+5. **Network & DNS:** Verify internal DNS resolution and firewall rules between ghwebhook and registered services.`
+
+	default:
+		return `1. **Check Service Health:** Verify if ghwebhook is healthy and accessible at its configured endpoint.
+2. **Review GitHub Webhook Deliveries:** In GitHub repository settings, check the Webhooks delivery log for recent failures, HTTP response codes, or timeouts.
+3. **Inspect Server Logs:** Check ghwebhook container logs for HMAC validation failures or gRPC forwarding errors.
+4. **Network & DNS:** Verify internal DNS resolution and firewall rules between ghwebhook and registered services.
+5. **Resolution:** After identifying and fixing the underlying failure, run the prober again or close this alert issue.`
+	}
 }

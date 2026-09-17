@@ -314,3 +314,275 @@ func TestHandleHardFailure_InvalidRepoFullName(t *testing.T) {
 		t.Fatalf("expected error for invalid repo format, got nil")
 	}
 }
+
+func TestBuildDiagnosticReport_FallbackNilDiagnostics(t *testing.T) {
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    30 * time.Second,
+		IssueNumber: 101,
+		Action:      "opened",
+		Message:     "webhook delivery timed out",
+		Diagnostics: nil,
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	// Check backwards-compatible standard elements
+	if !strings.Contains(body, "## 🚨 Prober Hard Failure Alert") {
+		t.Errorf("expected alert heading in report")
+	}
+	if !strings.Contains(body, "### Diagnostic Report") {
+		t.Errorf("expected diagnostic report heading")
+	}
+	if !strings.Contains(body, "brotherlogic/ghwebhook") {
+		t.Errorf("expected repo full name in report")
+	}
+	if !strings.Contains(body, "#101") {
+		t.Errorf("expected issue number in report")
+	}
+	if !strings.Contains(body, "### Operator Troubleshooting Steps") {
+		t.Errorf("expected standard troubleshooting steps")
+	}
+	if strings.Contains(body, "Root Cause:") {
+		t.Errorf("expected no root cause heading when diagnostics is nil")
+	}
+	if strings.Contains(body, "| Hook ID |") {
+		t.Errorf("expected no delivery table when diagnostics is nil")
+	}
+}
+
+func TestBuildDiagnosticReport_RootCauseWebhookMissing(t *testing.T) {
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 102,
+		Action:      "opened",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:        prober.RootCauseWebhookMissing,
+			RootCauseDetail:  "no active webhook configured for issue events found on repository",
+			ActiveHooksCount: 0,
+		},
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	if !strings.Contains(body, "Root Cause: Webhook Missing") {
+		t.Errorf("expected Root Cause heading with Webhook Missing, got:\n%s", body)
+	}
+	if !strings.Contains(body, "repository webhook configuration") && !strings.Contains(body, "repository webhook") {
+		t.Errorf("expected guidance to verify repository webhook configuration, got:\n%s", body)
+	}
+	if strings.Contains(body, "| Hook ID |") {
+		t.Errorf("expected no delivery table when no active hooks, got:\n%s", body)
+	}
+}
+
+func TestBuildDiagnosticReport_RootCauseDeliveryFailed(t *testing.T) {
+	deliveredAt := time.Date(2026, 9, 17, 16, 30, 0, 0, time.UTC)
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 103,
+		Action:      "reopened",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:        prober.RootCauseDeliveryFailed,
+			RootCauseDetail:  "webhook delivery failed with HTTP status 502: Bad Gateway",
+			ActiveHooksCount: 1,
+			MatchingDeliveries: []prober.HookDeliverySummary{
+				{
+					HookID:      123456,
+					DeliveryID:  789012,
+					GUID:        "guid-delivery-502",
+					DeliveredAt: deliveredAt,
+					StatusCode:  502,
+					Status:      "Bad Gateway",
+					Duration:    0.145,
+					Event:       "issues",
+					Action:      "reopened",
+				},
+			},
+		},
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	if !strings.Contains(body, "Root Cause: GitHub Delivery Failed") {
+		t.Errorf("expected Root Cause heading with GitHub Delivery Failed, got:\n%s", body)
+	}
+	// Delivery table check
+	tableHeaders := []string{"Hook ID", "Delivery GUID", "Delivered At", "HTTP Status", "Status Message", "Duration"}
+	for _, h := range tableHeaders {
+		if !strings.Contains(body, h) {
+			t.Errorf("expected delivery table header %q in body, got:\n%s", h, body)
+		}
+	}
+	if !strings.Contains(body, "123456") || !strings.Contains(body, "guid-delivery-502") || !strings.Contains(body, "502") || !strings.Contains(body, "Bad Gateway") {
+		t.Errorf("expected delivery row fields in table, got:\n%s", body)
+	}
+
+	// Guidance checks
+	requiredGuidance := []string{"ingress routing", "TLS certificates", "firewall", "ingress gateway logs"}
+	for _, g := range requiredGuidance {
+		if !strings.Contains(strings.ToLower(body), strings.ToLower(g)) {
+			t.Errorf("expected operator guidance to contain %q, got:\n%s", g, body)
+		}
+	}
+}
+
+func TestBuildDiagnosticReport_RootCauseLostInRouting(t *testing.T) {
+	deliveredAt := time.Date(2026, 9, 17, 16, 31, 0, 0, time.UTC)
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 104,
+		Action:      "reopened",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:        prober.RootCauseLostInRouting,
+			RootCauseDetail:  "webhook delivered by GitHub (HTTP 200) but was not received by handler",
+			ActiveHooksCount: 1,
+			MatchingDeliveries: []prober.HookDeliverySummary{
+				{
+					HookID:      123456,
+					DeliveryID:  789013,
+					GUID:        "guid-delivery-200",
+					DeliveredAt: deliveredAt,
+					StatusCode:  200,
+					Status:      "OK",
+					Duration:    0.025,
+					Event:       "issues",
+					Action:      "reopened",
+				},
+			},
+		},
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	if !strings.Contains(body, "Root Cause: Delivered by GitHub but Lost in Routing") {
+		t.Errorf("expected Root Cause heading with Lost in Routing, got:\n%s", body)
+	}
+	if !strings.Contains(body, "guid-delivery-200") || !strings.Contains(body, "200") {
+		t.Errorf("expected delivery details in table, got:\n%s", body)
+	}
+
+	// Guidance checks
+	requiredGuidance := []string{"proxy HMAC verification", "gRPC handler connectivity", "service registration"}
+	for _, g := range requiredGuidance {
+		if !strings.Contains(strings.ToLower(body), strings.ToLower(g)) {
+			t.Errorf("expected operator guidance to contain %q, got:\n%s", g, body)
+		}
+	}
+}
+
+func TestBuildDiagnosticReport_RootCauseNoDeliveryAttempted(t *testing.T) {
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 105,
+		Action:      "closed",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:          prober.RootCauseNoDeliveryAttempted,
+			RootCauseDetail:    "active webhook exists but no delivery attempt was recorded",
+			ActiveHooksCount:   1,
+			MatchingDeliveries: []prober.HookDeliverySummary{},
+		},
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	if !strings.Contains(body, "Root Cause: No Delivery Attempted") {
+		t.Errorf("expected Root Cause heading with No Delivery Attempted, got:\n%s", body)
+	}
+	if !strings.Contains(strings.ToLower(body), "upstream github event processing status") {
+		t.Errorf("expected operator guidance to contain 'upstream GitHub event processing status', got:\n%s", body)
+	}
+}
+
+func TestBuildDiagnosticReport_RootCauseInspectionUnavailable(t *testing.T) {
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 106,
+		Action:      "opened",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:       prober.RootCauseInspectionUnavailable,
+			RootCauseDetail: "insufficient token permissions (admin:repo_hook required)",
+			ErrorMessage:    "GET https://api.github.com/repos/brotherlogic/ghwebhook/hooks: 403 Must have admin rights to Repository",
+		},
+	}
+
+	body := prober.BuildDiagnosticReport("brotherlogic/ghwebhook", res)
+
+	if !strings.Contains(body, "Root Cause: Inspection Unavailable") {
+		t.Errorf("expected Root Cause heading with Inspection Unavailable, got:\n%s", body)
+	}
+	if !strings.Contains(body, "admin:repo_hook") {
+		t.Errorf("expected warning or guidance mentioning admin:repo_hook token permissions, got:\n%s", body)
+	}
+}
+
+func TestHandleHardFailure_WithDiagnostics_IncludesEnrichedReport(t *testing.T) {
+	ctx := context.Background()
+	newNum := 999
+	newURL := "https://github.com/brotherlogic/ghwebhook/issues/999"
+	stateOpen := "open"
+
+	var capturedBody string
+	mockClient := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			capturedBody = req.GetBody()
+			return &github.Issue{
+				Number:  &newNum,
+				HTMLURL: &newURL,
+				Title:   req.Title,
+				State:   &stateOpen,
+			}, nil
+		},
+	}
+
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    60 * time.Second,
+		IssueNumber: 107,
+		Action:      "reopened",
+		Message:     "timed out waiting for webhook event",
+		Diagnostics: &prober.InspectionDiagnostics{
+			RootCause:        prober.RootCauseLostInRouting,
+			RootCauseDetail:  "delivered by GitHub (HTTP 200) but lost in routing",
+			ActiveHooksCount: 1,
+			MatchingDeliveries: []prober.HookDeliverySummary{
+				{
+					HookID:      555,
+					DeliveryID:  777,
+					GUID:        "guid-12345",
+					DeliveredAt: time.Now().UTC(),
+					StatusCode:  200,
+					Status:      "OK",
+					Duration:    0.05,
+				},
+			},
+		},
+	}
+
+	alertRes, err := prober.HandleHardFailure(ctx, mockClient, "brotherlogic/ghwebhook", res)
+	if err != nil {
+		t.Fatalf("HandleHardFailure failed: %v", err)
+	}
+	if alertRes == nil || alertRes.IssueNumber != newNum {
+		t.Fatalf("unexpected alert result: %v", alertRes)
+	}
+	if !strings.Contains(capturedBody, "Root Cause: Delivered by GitHub but Lost in Routing") {
+		t.Errorf("expected captured body to contain Root Cause, got:\n%s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, "guid-12345") {
+		t.Errorf("expected captured body to contain delivery table GUID, got:\n%s", capturedBody)
+	}
+}
