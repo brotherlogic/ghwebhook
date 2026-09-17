@@ -15,14 +15,26 @@ import (
 	"github.com/brotherlogic/ghwebhook/prober"
 )
 
+const (
+	DefaultMetricsAddr        = ":8081"
+	DefaultMetricsHoldTimeout = 30 * time.Second
+)
+
+var (
+	recordResultFunc             = prober.RecordResult
+	serveMetricsUntilScrapedFunc = prober.ServeMetricsUntilScraped
+)
+
 // Config encapsulates configuration parameters for the prober CLI.
 type Config struct {
-	Repo          string
-	GHWebhookAddr string
-	ListenAddr    string
-	ServiceAddr   string
-	Timeout       time.Duration
-	GitHubToken   string
+	Repo               string
+	GHWebhookAddr      string
+	ListenAddr         string
+	ServiceAddr        string
+	Timeout            time.Duration
+	GitHubToken        string
+	MetricsAddr        string
+	MetricsHoldTimeout time.Duration
 }
 
 // parseConfig parses command-line arguments and falls back to environment variables.
@@ -61,6 +73,21 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 		timeout = d
 	}
 
+	metricsAddr := getenv("PROBER_METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = DefaultMetricsAddr
+	}
+
+	metricsHoldTimeoutStr := getenv("PROBER_METRICS_HOLD_TIMEOUT")
+	metricsHoldTimeout := DefaultMetricsHoldTimeout
+	if metricsHoldTimeoutStr != "" {
+		d, err := time.ParseDuration(metricsHoldTimeoutStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid PROBER_METRICS_HOLD_TIMEOUT duration %q: %w", metricsHoldTimeoutStr, err)
+		}
+		metricsHoldTimeout = d
+	}
+
 	token := getenv("GH_TOKEN")
 	if token == "" {
 		token = getenv("GITHUB_TOKEN")
@@ -73,6 +100,8 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.StringVar(&serviceAddr, "service-addr", serviceAddr, "Service address advertised to ghwebhook")
 	fs.DurationVar(&timeout, "timeout", timeout, "Maximum execution timeout for the probe")
 	fs.StringVar(&token, "github-token", token, "GitHub API token")
+	fs.StringVar(&metricsAddr, "metrics-addr", metricsAddr, "Address for Prometheus metrics scrape server")
+	fs.DurationVar(&metricsHoldTimeout, "metrics-hold-timeout", metricsHoldTimeout, "Maximum duration to hold and serve Prometheus metrics until scraped")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -83,17 +112,19 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 	}
 
 	return &Config{
-		Repo:          repo,
-		GHWebhookAddr: ghwebhookAddr,
-		ListenAddr:    listenAddr,
-		ServiceAddr:   serviceAddr,
-		Timeout:       timeout,
-		GitHubToken:   token,
+		Repo:               repo,
+		GHWebhookAddr:      ghwebhookAddr,
+		ListenAddr:         listenAddr,
+		ServiceAddr:        serviceAddr,
+		Timeout:            timeout,
+		GitHubToken:        token,
+		MetricsAddr:        metricsAddr,
+		MetricsHoldTimeout: metricsHoldTimeout,
 	}, nil
 }
 
 // run executes the prober instance, emits structured logs, and returns the exit code.
-func run(ctx context.Context, p *prober.Prober, ghClient prober.GitHubIssueClient, repo string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, cfg *Config, p *prober.Prober, ghClient prober.GitHubIssueClient, repo string, stdout, stderr io.Writer) int {
 	if ghClient == nil && p != nil {
 		ghClient = p.GitHubClient()
 	}
@@ -102,6 +133,26 @@ func run(ctx context.Context, p *prober.Prober, ghClient prober.GitHubIssueClien
 	}
 
 	result, _ := p.Run(ctx)
+
+	metricsAddr := DefaultMetricsAddr
+	metricsHoldTimeout := DefaultMetricsHoldTimeout
+	if cfg != nil {
+		if cfg.MetricsAddr != "" {
+			metricsAddr = cfg.MetricsAddr
+		}
+		if cfg.MetricsHoldTimeout > 0 {
+			metricsHoldTimeout = cfg.MetricsHoldTimeout
+		}
+	}
+
+	recordResultFunc(repo, result)
+
+	if err := serveMetricsUntilScrapedFunc(ctx, metricsAddr, metricsHoldTimeout); err != nil {
+		slog.ErrorContext(ctx, "failed to serve prober metrics",
+			slog.String("error", err.Error()),
+			slog.String("metrics_addr", metricsAddr),
+		)
+	}
 
 	handler := slog.NewJSONHandler(stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -192,7 +243,7 @@ func runWithProberAndClient(ctx context.Context, cfg *Config, ghClient prober.Gi
 	opts = append(opts, extraOpts...)
 
 	p := prober.NewProber(opts...)
-	return run(ctx, p, p.GitHubClient(), cfg.Repo, stdout, stderr)
+	return run(ctx, cfg, p, p.GitHubClient(), cfg.Repo, stdout, stderr)
 }
 
 func main() {

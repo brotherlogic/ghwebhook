@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"io"
+	"net"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +19,21 @@ import (
 	"github.com/google/go-github/v69/github"
 	"google.golang.org/grpc"
 )
+
+var (
+	origRecordResult             = prober.RecordResult
+	origServeMetricsUntilScraped = prober.ServeMetricsUntilScraped
+)
+
+func TestMain(m *testing.M) {
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		return nil
+	}
+	code := m.Run()
+	serveMetricsUntilScrapedFunc = origServeMetricsUntilScraped
+	recordResultFunc = origRecordResult
+	os.Exit(code)
+}
 
 type mockRegistrationClient struct {
 	pb.RegistrationServiceClient
@@ -340,7 +359,7 @@ func TestRun_Success_WithDispatchedEvent(t *testing.T) {
 		})
 	}()
 
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != int(prober.StatusSuccess) {
 		t.Fatalf("expected exit code %d (StatusSuccess), got %d (stdout: %s)", prober.StatusSuccess, exitCode, stdout.String())
 	}
@@ -408,7 +427,7 @@ func TestRun_Success_ExitZero(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 on success, got %d", exitCode)
 	}
@@ -449,7 +468,7 @@ func TestRun_SoftFailure_ExitZero(t *testing.T) {
 	)
 
 	var stdout, stderr bytes.Buffer
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 on soft failure, got %d", exitCode)
 	}
@@ -514,7 +533,7 @@ func TestRun_HardFailure_AlertCreated_ExitZero(t *testing.T) {
 	)
 
 	var stdout, stderr bytes.Buffer
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 on hard failure when alert is created, got %d", exitCode)
 	}
@@ -579,7 +598,7 @@ func TestRun_HardFailure_AlertDeduplicated_ExitZero(t *testing.T) {
 	)
 
 	var stdout, stderr bytes.Buffer
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 on hard failure when alert is deduplicated, got %d", exitCode)
 	}
@@ -630,8 +649,571 @@ func TestRun_HardFailure_AlertFailed_ExitOne(t *testing.T) {
 	)
 
 	var stdout, stderr bytes.Buffer
-	exitCode := run(context.Background(), p, mockGH, cfg.Repo, &stdout, &stderr)
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
 	if exitCode != 1 {
 		t.Fatalf("expected exit code 1 when alert creation fails, got %d", exitCode)
 	}
 }
+
+func TestParseConfig_MetricsDefaults(t *testing.T) {
+	getenv := func(key string) string {
+		if key == "GH_TOKEN" {
+			return "default-token"
+		}
+		return ""
+	}
+	cfg, err := parseConfig([]string{}, getenv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.MetricsAddr != ":8081" {
+		t.Errorf("expected MetricsAddr %q, got %q", ":8081", cfg.MetricsAddr)
+	}
+	if cfg.MetricsHoldTimeout != 30*time.Second {
+		t.Errorf("expected MetricsHoldTimeout 30s, got %v", cfg.MetricsHoldTimeout)
+	}
+}
+
+func TestParseConfig_MetricsEnvVars(t *testing.T) {
+	env := map[string]string{
+		"GH_TOKEN":                     "default-token",
+		"PROBER_METRICS_ADDR":         ":9090",
+		"PROBER_METRICS_HOLD_TIMEOUT": "15s",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	cfg, err := parseConfig([]string{}, getenv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.MetricsAddr != ":9090" {
+		t.Errorf("expected MetricsAddr %q, got %q", ":9090", cfg.MetricsAddr)
+	}
+	if cfg.MetricsHoldTimeout != 15*time.Second {
+		t.Errorf("expected MetricsHoldTimeout 15s, got %v", cfg.MetricsHoldTimeout)
+	}
+}
+
+func TestParseConfig_MetricsFlagOverrides(t *testing.T) {
+	env := map[string]string{
+		"GH_TOKEN":                     "default-token",
+		"PROBER_METRICS_ADDR":         ":9090",
+		"PROBER_METRICS_HOLD_TIMEOUT": "15s",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	args := []string{
+		"--metrics-addr=:9091",
+		"--metrics-hold-timeout=45s",
+	}
+
+	cfg, err := parseConfig(args, getenv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.MetricsAddr != ":9091" {
+		t.Errorf("expected MetricsAddr %q, got %q", ":9091", cfg.MetricsAddr)
+	}
+	if cfg.MetricsHoldTimeout != 45*time.Second {
+		t.Errorf("expected MetricsHoldTimeout 45s, got %v", cfg.MetricsHoldTimeout)
+	}
+}
+
+func TestParseConfig_InvalidMetricsHoldTimeout(t *testing.T) {
+	env := map[string]string{
+		"GH_TOKEN":                     "default-token",
+		"PROBER_METRICS_HOLD_TIMEOUT": "invalid-duration",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	_, err := parseConfig([]string{}, getenv)
+	if err == nil {
+		t.Fatalf("expected error on invalid PROBER_METRICS_HOLD_TIMEOUT, got nil")
+	}
+}
+
+func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_Success(t *testing.T) {
+	createdNumber := 301
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			title := "PROBER TEST"
+			state := "open"
+			return &github.Issue{Number: &createdNumber, Title: &title, State: &state}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := "closed"
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            2 * time.Second,
+		MetricsAddr:        ":8089",
+		MetricsHoldTimeout: 10 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = p.ReceiveWebhook(context.Background(), &pb.WebhookEvent{
+			Header: &pb.EventHeader{EventType: "issues"},
+			Payload: &pb.WebhookEvent_Issue{
+				Issue: &pb.IssueEvent{
+					Action: "opened",
+					Number: int32(createdNumber),
+					Title:  "PROBER TEST",
+					Repository: &pb.Repository{
+						FullName: "brotherlogic/ghwebhook",
+					},
+				},
+			},
+		})
+	}()
+
+	var recordedRepo string
+	var recordedResult prober.Result
+	var recordCalled bool
+
+	var servedAddr string
+	var servedTimeout time.Duration
+	var serveCalled bool
+
+	origRecord := recordResultFunc
+	origServe := serveMetricsUntilScrapedFunc
+	defer func() {
+		recordResultFunc = origRecord
+		serveMetricsUntilScrapedFunc = origServe
+	}()
+
+	recordResultFunc = func(repo string, res prober.Result) {
+		recordCalled = true
+		recordedRepo = repo
+		recordedResult = res
+	}
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		serveCalled = true
+		servedAddr = addr
+		servedTimeout = timeout
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0 on success, got %d", exitCode)
+	}
+
+	if !recordCalled {
+		t.Fatalf("expected RecordResult to be invoked, but was not")
+	}
+	if recordedRepo != cfg.Repo {
+		t.Errorf("expected recorded repo %q, got %q", cfg.Repo, recordedRepo)
+	}
+	if recordedResult.Status != prober.StatusSuccess {
+		t.Errorf("expected recorded status %v, got %v", prober.StatusSuccess, recordedResult.Status)
+	}
+
+	if !serveCalled {
+		t.Fatalf("expected ServeMetricsUntilScraped to be invoked, but was not")
+	}
+	if servedAddr != ":8089" {
+		t.Errorf("expected served addr %q, got %q", ":8089", servedAddr)
+	}
+	if servedTimeout != 10*time.Second {
+		t.Errorf("expected served timeout 10s, got %v", servedTimeout)
+	}
+}
+
+func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_SoftFailure(t *testing.T) {
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return nil, errors.New("rate limit exceeded (403)")
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            1 * time.Second,
+		MetricsAddr:        ":8088",
+		MetricsHoldTimeout: 5 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	var recordedResult prober.Result
+	var recordCalled bool
+	var serveCalled bool
+
+	origRecord := recordResultFunc
+	origServe := serveMetricsUntilScrapedFunc
+	defer func() {
+		recordResultFunc = origRecord
+		serveMetricsUntilScrapedFunc = origServe
+	}()
+
+	recordResultFunc = func(repo string, res prober.Result) {
+		recordCalled = true
+		recordedResult = res
+	}
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		serveCalled = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0 on soft failure, got %d", exitCode)
+	}
+
+	if !recordCalled {
+		t.Fatalf("expected RecordResult to be called on soft failure")
+	}
+	if recordedResult.Status != prober.StatusSoftFailure {
+		t.Errorf("expected StatusSoftFailure, got %v", recordedResult.Status)
+	}
+	if !serveCalled {
+		t.Fatalf("expected ServeMetricsUntilScraped to be called on soft failure")
+	}
+}
+
+func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_HardFailure(t *testing.T) {
+	alertIssueNum := 888
+	alertURL := "https://github.com/brotherlogic/ghwebhook/issues/888"
+	createdNumber := 302
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			if req.GetTitle() == prober.DefaultAlertTitle {
+				return &github.Issue{
+					Number:  &alertIssueNum,
+					HTMLURL: &alertURL,
+					Title:   github.Ptr(prober.DefaultAlertTitle),
+					State:   github.Ptr("open"),
+				}, nil
+			}
+			return &github.Issue{
+				Number: &createdNumber,
+				Title:  github.Ptr("PROBER TEST"),
+				State:  github.Ptr("open"),
+			}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			return &github.Issue{Number: &number, State: github.Ptr("closed")}, nil
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            50 * time.Millisecond,
+		MetricsAddr:        ":8087",
+		MetricsHoldTimeout: 5 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	var recordedResult prober.Result
+	var recordCalled bool
+	var serveCalled bool
+
+	origRecord := recordResultFunc
+	origServe := serveMetricsUntilScrapedFunc
+	defer func() {
+		recordResultFunc = origRecord
+		serveMetricsUntilScrapedFunc = origServe
+	}()
+
+	recordResultFunc = func(repo string, res prober.Result) {
+		recordCalled = true
+		recordedResult = res
+	}
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		serveCalled = true
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0 on hard failure with successful alert, got %d", exitCode)
+	}
+
+	if !recordCalled {
+		t.Fatalf("expected RecordResult to be called on hard failure")
+	}
+	if recordedResult.Status != prober.StatusHardFailure {
+		t.Errorf("expected StatusHardFailure, got %v", recordedResult.Status)
+	}
+	if !serveCalled {
+		t.Fatalf("expected ServeMetricsUntilScraped to be called on hard failure")
+	}
+}
+
+func TestRun_MetricsScrapeServerError_DoesNotAlterExitCode_Success(t *testing.T) {
+	createdNumber := 303
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			title := "PROBER TEST"
+			state := "open"
+			return &github.Issue{Number: &createdNumber, Title: &title, State: &state}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := "closed"
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            2 * time.Second,
+		MetricsAddr:        ":8081",
+		MetricsHoldTimeout: 30 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = p.ReceiveWebhook(context.Background(), &pb.WebhookEvent{
+			Header: &pb.EventHeader{EventType: "issues"},
+			Payload: &pb.WebhookEvent_Issue{
+				Issue: &pb.IssueEvent{
+					Action: "opened",
+					Number: int32(createdNumber),
+					Title:  "PROBER TEST",
+					Repository: &pb.Repository{
+						FullName: "brotherlogic/ghwebhook",
+					},
+				},
+			},
+		})
+	}()
+
+	origServe := serveMetricsUntilScrapedFunc
+	defer func() {
+		serveMetricsUntilScrapedFunc = origServe
+	}()
+
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		return errors.New("listen tcp :8081: bind: address already in use")
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0 despite scrape server error, got %d", exitCode)
+	}
+}
+
+func TestRun_MetricsScrapeServerError_DoesNotAlterExitCode_HardFailureAlertFailure(t *testing.T) {
+	createdNumber := 304
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			if strings.Contains(query, prober.DefaultAlertTitle) {
+				return nil, errors.New("github API outage during alert search")
+			}
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			return &github.Issue{
+				Number: &createdNumber,
+				Title:  github.Ptr("PROBER TEST"),
+				State:  github.Ptr("open"),
+			}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			return &github.Issue{Number: &number, State: github.Ptr("closed")}, nil
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            50 * time.Millisecond,
+		MetricsAddr:        ":8081",
+		MetricsHoldTimeout: 30 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	origServe := serveMetricsUntilScrapedFunc
+	defer func() {
+		serveMetricsUntilScrapedFunc = origServe
+	}()
+
+	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
+		return errors.New("listen tcp :8081: bind: address already in use")
+	}
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	// On hard failure when alert creation fails, exit code must remain 1.
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1 when alert fails on hard failure, got %d", exitCode)
+	}
+}
+
+func TestRun_RealServeMetricsUntilScraped_Integration(t *testing.T) {
+	origServe := serveMetricsUntilScrapedFunc
+	origRecord := recordResultFunc
+	defer func() {
+		serveMetricsUntilScrapedFunc = origServe
+		recordResultFunc = origRecord
+	}()
+
+	serveMetricsUntilScrapedFunc = prober.ServeMetricsUntilScraped
+	recordResultFunc = prober.RecordResult
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	createdNumber := 305
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			title := "PROBER TEST"
+			state := "open"
+			return &github.Issue{Number: &createdNumber, Title: &title, State: &state}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := "closed"
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	cfg := &Config{
+		Repo:               "brotherlogic/ghwebhook",
+		GHWebhookAddr:      "localhost:50051",
+		ListenAddr:         "127.0.0.1:0",
+		ServiceAddr:        "127.0.0.1:0",
+		Timeout:            2 * time.Second,
+		MetricsAddr:        addr,
+		MetricsHoldTimeout: 5 * time.Second,
+	}
+
+	p := prober.NewProber(
+		prober.WithRepo(cfg.Repo),
+		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
+		prober.WithListenAddr(cfg.ListenAddr),
+		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithTimeout(cfg.Timeout),
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	scraped := make(chan bool, 1)
+	go func() {
+		client := &http.Client{Timeout: 500 * time.Millisecond}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+			resp, getErr := client.Get("http://" + addr + "/metrics")
+			if getErr == nil {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK && strings.Contains(string(body), "ghwebhook_prober_runs_total") {
+					scraped <- true
+					return
+				}
+			}
+		}
+		scraped <- false
+	}()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := run(context.Background(), cfg, p, mockGH, cfg.Repo, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+
+	select {
+	case ok := <-scraped:
+		if !ok {
+			t.Errorf("failed to scrape metrics endpoint or missing expected metric")
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("timed out waiting for scraper goroutine")
+	}
+}
+
+
+
