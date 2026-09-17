@@ -305,3 +305,178 @@ func TestDefaultGitHubIssueClient_SearchQueryFormatting(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubHookClient_Mock(t *testing.T) {
+	hookID := int64(12345)
+	deliveryID := int64(67890)
+	guid := "test-guid"
+
+	mockClient := &prober.MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			if owner != "brotherlogic" || repo != "ghwebhook" {
+				t.Errorf("unexpected repo: %s/%s", owner, repo)
+			}
+			return []*github.Hook{
+				{
+					ID: &hookID,
+				},
+			}, nil
+		},
+		ListHookDeliveriesFunc: func(ctx context.Context, owner, repo string, hID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+			if hID != hookID {
+				t.Errorf("unexpected hook ID: %d", hID)
+			}
+			return []*github.HookDelivery{
+				{
+					ID:   &deliveryID,
+					GUID: &guid,
+				},
+			}, nil
+		},
+	}
+
+	var client prober.GitHubHookClient = mockClient
+
+	// Verify ListHooks
+	hooks, err := client.ListHooks(context.Background(), "brotherlogic", "ghwebhook", nil)
+	if err != nil {
+		t.Fatalf("ListHooks failed: %v", err)
+	}
+	if len(hooks) != 1 || hooks[0].GetID() != hookID {
+		t.Fatalf("unexpected hooks result: %+v", hooks)
+	}
+
+	// Verify ListHookDeliveries
+	deliveries, err := client.ListHookDeliveries(context.Background(), "brotherlogic", "ghwebhook", hookID, nil)
+	if err != nil {
+		t.Fatalf("ListHookDeliveries failed: %v", err)
+	}
+	if len(deliveries) != 1 || deliveries[0].GetID() != deliveryID || deliveries[0].GetGUID() != guid {
+		t.Fatalf("unexpected deliveries result: %+v", deliveries)
+	}
+}
+
+func TestGitHubHookClient_Mock_NilFuncs(t *testing.T) {
+	mockClient := &prober.MockGitHubHookClient{}
+	hooks, err := mockClient.ListHooks(context.Background(), "owner", "repo", nil)
+	if err != nil || hooks != nil {
+		t.Errorf("expected nil result and nil error when ListHooksFunc is nil")
+	}
+	deliveries, err := mockClient.ListHookDeliveries(context.Background(), "owner", "repo", 123, nil)
+	if err != nil || deliveries != nil {
+		t.Errorf("expected nil result and nil error when ListHookDeliveriesFunc is nil")
+	}
+}
+
+func TestNewDefaultGitHubHookClient_TokenResolution(t *testing.T) {
+	// 1. Explicit token
+	c1 := prober.NewDefaultGitHubHookClient("explicit-token")
+	if c1 == nil {
+		t.Fatal("expected non-nil hook client with explicit token")
+	}
+
+	// 2. Fallback to GH_TOKEN
+	t.Setenv("GH_TOKEN", "gh-env-token")
+	t.Setenv("GITHUB_TOKEN", "")
+	c2 := prober.NewDefaultGitHubHookClient("")
+	if c2 == nil {
+		t.Fatal("expected non-nil hook client with GH_TOKEN")
+	}
+
+	// 3. Fallback to GITHUB_TOKEN
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "github-env-token")
+	c3 := prober.NewDefaultGitHubHookClient("")
+	if c3 == nil {
+		t.Fatal("expected non-nil hook client with GITHUB_TOKEN")
+	}
+
+	// 4. Unauthenticated fallback
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	c4 := prober.NewDefaultGitHubHookClient("")
+	if c4 == nil {
+		t.Fatal("expected non-nil hook client with empty token")
+	}
+}
+
+func TestNewGitHubHookClientFromClient(t *testing.T) {
+	rawClient := github.NewClient(nil)
+	c := prober.NewGitHubHookClientFromClient(rawClient)
+	if c == nil {
+		t.Fatal("expected non-nil hook client from existing *github.Client")
+	}
+}
+
+func TestDefaultGitHubHookClient_LiveHttpEndpoints(t *testing.T) {
+	hookID := int64(9876)
+	deliveryID := int64(54321)
+	guid := "delivery-guid-xyz"
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/brotherlogic/ghwebhook/hooks":
+			page := r.URL.Query().Get("page")
+			perPage := r.URL.Query().Get("per_page")
+			if page != "2" || perPage != "10" {
+				t.Errorf("unexpected query params: page=%s, per_page=%s", page, perPage)
+			}
+			hooks := []*github.Hook{
+				{
+					ID:   github.Ptr(hookID),
+					Name: github.Ptr("web"),
+				},
+			}
+			_ = json.NewEncoder(w).Encode(hooks)
+
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/brotherlogic/ghwebhook/hooks/9876/deliveries":
+			cursor := r.URL.Query().Get("cursor")
+			if cursor != "cursor123" {
+				t.Errorf("unexpected cursor: %s", cursor)
+			}
+			deliveries := []*github.HookDelivery{
+				{
+					ID:   github.Ptr(deliveryID),
+					GUID: github.Ptr(guid),
+				},
+			}
+			_ = json.NewEncoder(w).Encode(deliveries)
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	gh := github.NewClient(ts.Client())
+	gh.BaseURL, _ = gh.BaseURL.Parse(ts.URL + "/")
+
+	client := prober.NewGitHubHookClientFromClient(gh)
+	ctx := context.Background()
+
+	// 1. ListHooks
+	hooks, err := client.ListHooks(ctx, "brotherlogic", "ghwebhook", &github.ListOptions{
+		Page:    2,
+		PerPage: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListHooks failed: %v", err)
+	}
+	if len(hooks) != 1 || hooks[0].GetID() != hookID {
+		t.Fatalf("unexpected hooks result: %+v", hooks)
+	}
+
+	// 2. ListHookDeliveries
+	deliveries, err := client.ListHookDeliveries(ctx, "brotherlogic", "ghwebhook", hookID, &github.ListCursorOptions{
+		Cursor: "cursor123",
+	})
+	if err != nil {
+		t.Fatalf("ListHookDeliveries failed: %v", err)
+	}
+	if len(deliveries) != 1 || deliveries[0].GetID() != deliveryID || deliveries[0].GetGUID() != guid {
+		t.Fatalf("unexpected deliveries result: %+v", deliveries)
+	}
+}
+
