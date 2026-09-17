@@ -34,6 +34,44 @@ func (s ResultStatus) String() string {
 	}
 }
 
+// RootCause classifies the underlying reason for a prober webhook delivery failure.
+type RootCause string
+
+const (
+	// RootCauseWebhookMissing indicates no active webhook listening for issues was found on the repository.
+	RootCauseWebhookMissing RootCause = "Webhook Missing"
+	// RootCauseDeliveryFailed indicates GitHub attempted delivery but received a non-2xx HTTP status or network failure.
+	RootCauseDeliveryFailed RootCause = "GitHub Delivery Failed"
+	// RootCauseLostInRouting indicates GitHub successfully delivered the webhook (HTTP 2xx) but it was not received or matched by the prober handler.
+	RootCauseLostInRouting RootCause = "Delivered by GitHub but Lost in Routing"
+	// RootCauseNoDeliveryAttempted indicates active webhooks exist but GitHub made no delivery attempt for the prober event.
+	RootCauseNoDeliveryAttempted RootCause = "No Delivery Attempted"
+	// RootCauseInspectionUnavailable indicates the prober could not inspect webhook deliveries (e.g. insufficient token permissions or API errors).
+	RootCauseInspectionUnavailable RootCause = "Inspection Unavailable"
+)
+
+// HookDeliverySummary summarizes the diagnostic details of a single GitHub webhook delivery attempt.
+type HookDeliverySummary struct {
+	HookID      int64
+	DeliveryID  int64
+	GUID        string
+	DeliveredAt time.Time
+	StatusCode  int
+	Status      string
+	Duration    float64
+	Event       string
+	Action      string
+}
+
+// InspectionDiagnostics encapsulates the root cause and delivery inspection findings for a failed prober run.
+type InspectionDiagnostics struct {
+	RootCause          RootCause
+	RootCauseDetail    string
+	ActiveHooksCount   int
+	MatchingDeliveries []HookDeliverySummary
+	ErrorMessage       string
+}
+
 // Result captures the full execution result of a Prober run.
 type Result struct {
 	Status      ResultStatus
@@ -42,6 +80,7 @@ type Result struct {
 	Action      string
 	Message     string
 	Err         error
+	Diagnostics *InspectionDiagnostics
 }
 
 // Defaults for prober configuration options.
@@ -59,6 +98,7 @@ type Prober struct {
 	pb.UnimplementedWebhookHandlerServer
 
 	ghClient          GitHubIssueClient
+	hookClient        GitHubHookClient
 	regClient         pb.RegistrationServiceClient
 	repoFullName      string
 	targetTitle       string
@@ -140,6 +180,13 @@ func WithGitHubClient(client GitHubIssueClient) Option {
 	}
 }
 
+// WithHookClient configures the GitHubHookClient interface.
+func WithHookClient(client GitHubHookClient) Option {
+	return func(p *Prober) {
+		p.hookClient = client
+	}
+}
+
 // WithRegistrationClient configures the ghwebhook RegistrationService gRPC client.
 func WithRegistrationClient(client pb.RegistrationServiceClient) Option {
 	return func(p *Prober) {
@@ -178,6 +225,13 @@ func (p *Prober) GitHubClient() GitHubIssueClient {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ghClient
+}
+
+// HookClient returns the configured GitHubHookClient on the Prober.
+func (p *Prober) HookClient() GitHubHookClient {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.hookClient
 }
 
 // RepoFullName returns the configured repository full name on the Prober.

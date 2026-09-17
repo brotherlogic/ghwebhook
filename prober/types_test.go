@@ -209,3 +209,97 @@ func TestProber_Setters(t *testing.T) {
 		t.Errorf("p.targetAction = %q, want 'reopened'", p.targetAction)
 	}
 }
+
+func TestRootCause_Constants(t *testing.T) {
+	tests := []struct {
+		rc       RootCause
+		expected string
+	}{
+		{RootCauseWebhookMissing, "Webhook Missing"},
+		{RootCauseDeliveryFailed, "GitHub Delivery Failed"},
+		{RootCauseLostInRouting, "Delivered by GitHub but Lost in Routing"},
+		{RootCauseNoDeliveryAttempted, "No Delivery Attempted"},
+		{RootCauseInspectionUnavailable, "Inspection Unavailable"},
+	}
+
+	for _, tt := range tests {
+		if string(tt.rc) != tt.expected {
+			t.Errorf("RootCause got %q, want %q", tt.rc, tt.expected)
+		}
+	}
+}
+
+func TestDiagnosticStructs_Instantiation(t *testing.T) {
+	now := time.Now()
+	delivery := HookDeliverySummary{
+		HookID:      12345,
+		DeliveryID:  67890,
+		GUID:        "guid-123",
+		DeliveredAt: now,
+		StatusCode:  200,
+		Status:      "OK",
+		Duration:    0.25,
+		Event:       "issues",
+		Action:      "opened",
+	}
+
+	if delivery.HookID != 12345 || delivery.DeliveryID != 67890 || delivery.GUID != "guid-123" {
+		t.Errorf("HookDeliverySummary unexpected IDs: %+v", delivery)
+	}
+	if delivery.DeliveredAt != now || delivery.StatusCode != 200 || delivery.Status != "OK" {
+		t.Errorf("HookDeliverySummary unexpected status/time: %+v", delivery)
+	}
+	if delivery.Duration != 0.25 || delivery.Event != "issues" || delivery.Action != "opened" {
+		t.Errorf("HookDeliverySummary unexpected payload metadata: %+v", delivery)
+	}
+
+	diag := InspectionDiagnostics{
+		RootCause:          RootCauseDeliveryFailed,
+		RootCauseDetail:    "HTTP 502 Bad Gateway from target server",
+		ActiveHooksCount:   2,
+		MatchingDeliveries: []HookDeliverySummary{delivery},
+		ErrorMessage:       "connection refused",
+	}
+
+	if diag.RootCause != RootCauseDeliveryFailed {
+		t.Errorf("diag.RootCause = %v, want %v", diag.RootCause, RootCauseDeliveryFailed)
+	}
+	if diag.RootCauseDetail != "HTTP 502 Bad Gateway from target server" {
+		t.Errorf("diag.RootCauseDetail = %q", diag.RootCauseDetail)
+	}
+	if diag.ActiveHooksCount != 2 {
+		t.Errorf("diag.ActiveHooksCount = %d, want 2", diag.ActiveHooksCount)
+	}
+	if len(diag.MatchingDeliveries) != 1 || diag.MatchingDeliveries[0].GUID != "guid-123" {
+		t.Errorf("diag.MatchingDeliveries unexpected: %+v", diag.MatchingDeliveries)
+	}
+	if diag.ErrorMessage != "connection refused" {
+		t.Errorf("diag.ErrorMessage = %q, want 'connection refused'", diag.ErrorMessage)
+	}
+}
+
+func TestResult_DiagnosticsField(t *testing.T) {
+	diag := &InspectionDiagnostics{
+		RootCause: RootCauseLostInRouting,
+	}
+
+	res := Result{
+		Status:      StatusHardFailure,
+		Diagnostics: diag,
+	}
+
+	if res.Diagnostics == nil || res.Diagnostics.RootCause != RootCauseLostInRouting {
+		t.Errorf("res.Diagnostics = %+v, want RootCauseLostInRouting", res.Diagnostics)
+	}
+}
+
+func TestWithHookClient(t *testing.T) {
+	mockHook := &MockGitHubHookClient{}
+
+	p := NewProber(WithHookClient(mockHook))
+
+	if p.HookClient() != mockHook {
+		t.Errorf("p.HookClient() = %v, want %v", p.HookClient(), mockHook)
+	}
+}
+
