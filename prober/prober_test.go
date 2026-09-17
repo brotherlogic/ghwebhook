@@ -3,7 +3,9 @@ package prober
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -885,4 +887,178 @@ func TestProber_RegistrationNilResponse(t *testing.T) {
 	if err.Error() != expectedMsg {
 		t.Errorf("err.Error() = %q, want %q", err.Error(), expectedMsg)
 	}
+}
+
+func TestIsGitHub422(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "github.ErrorResponse with 422",
+			err: &github.ErrorResponse{
+				Response: &http.Response{
+					StatusCode: http.StatusUnprocessableEntity,
+				},
+				Message: "Query must include 'is:issue' or 'is:pull-request'",
+			},
+			want: true,
+		},
+		{
+			name: "wrapped github.ErrorResponse with 422",
+			err: fmt.Errorf("search failed: %w", &github.ErrorResponse{
+				Response: &http.Response{
+					StatusCode: http.StatusUnprocessableEntity,
+				},
+			}),
+			want: true,
+		},
+		{
+			name: "error message containing 422",
+			err:  errors.New("GET https://api.github.com/search/issues?q=...: 422 Query must include 'is:issue' or 'is:pull-request' []"),
+			want: true,
+		},
+		{
+			name: "github.ErrorResponse with 500",
+			err: &github.ErrorResponse{
+				Response: &http.Response{
+					StatusCode: http.StatusInternalServerError,
+				},
+			},
+			want: false,
+		},
+		{
+			name: "github.ErrorResponse with 429",
+			err: &github.ErrorResponse{
+				Response: &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+				},
+			},
+			want: false,
+		},
+		{
+			name: "generic network error",
+			err:  errors.New("connection reset by peer"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGitHub422(tt.err); got != tt.want {
+				t.Errorf("isGitHub422(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProber_HardFailure_GitHub422(t *testing.T) {
+	t.Run("SearchIssues 422 returns StatusHardFailure", func(t *testing.T) {
+		regClient := &mockRegistrationServiceClient{}
+		ghClient := &MockGitHubIssueClient{
+			SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+				return nil, &github.ErrorResponse{
+					Response: &http.Response{StatusCode: 422},
+					Message:  "Query must include 'is:issue' or 'is:pull-request'",
+				}
+			},
+		}
+
+		p := NewProber(
+			WithRepo("brotherlogic/ghwebhook"),
+			WithTargetTitle("PROBER TEST"),
+			WithListenAddr("127.0.0.1:0"),
+			WithServiceAddr("127.0.0.1:0"),
+			WithTimeout(5*time.Second),
+			WithRegistrationClient(regClient),
+			WithGitHubClient(ghClient),
+		)
+
+		res, err := p.Run(context.Background())
+		if err == nil {
+			t.Fatal("expected error from Run, got nil")
+		}
+		if res.Status != StatusHardFailure {
+			t.Fatalf("expected StatusHardFailure (1) for 422 error, got %v", res.Status)
+		}
+	})
+
+	t.Run("CreateIssue 422 returns StatusHardFailure", func(t *testing.T) {
+		regClient := &mockRegistrationServiceClient{}
+		ghClient := &MockGitHubIssueClient{
+			SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+				return []*github.Issue{}, nil
+			},
+			CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+				return nil, errors.New("422 Validation Failed: Invalid field")
+			},
+		}
+
+		p := NewProber(
+			WithRepo("brotherlogic/ghwebhook"),
+			WithTargetTitle("PROBER TEST"),
+			WithListenAddr("127.0.0.1:0"),
+			WithServiceAddr("127.0.0.1:0"),
+			WithTimeout(5*time.Second),
+			WithRegistrationClient(regClient),
+			WithGitHubClient(ghClient),
+		)
+
+		res, err := p.Run(context.Background())
+		if err == nil {
+			t.Fatal("expected error from Run, got nil")
+		}
+		if res.Status != StatusHardFailure {
+			t.Fatalf("expected StatusHardFailure (1) for 422 error, got %v", res.Status)
+		}
+	})
+
+	t.Run("EditIssue 422 returns StatusHardFailure", func(t *testing.T) {
+		num := 99
+		state := "open"
+		title := "PROBER TEST"
+
+		regClient := &mockRegistrationServiceClient{}
+		ghClient := &MockGitHubIssueClient{
+			SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+				return []*github.Issue{
+					{
+						Number: &num,
+						State:  &state,
+						Title:  &title,
+					},
+				}, nil
+			},
+			EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+				return nil, &github.ErrorResponse{
+					Response: &http.Response{StatusCode: 422},
+					Message:  "Validation Failed",
+				}
+			},
+		}
+
+		p := NewProber(
+			WithRepo("brotherlogic/ghwebhook"),
+			WithTargetTitle("PROBER TEST"),
+			WithListenAddr("127.0.0.1:0"),
+			WithServiceAddr("127.0.0.1:0"),
+			WithTimeout(5*time.Second),
+			WithRegistrationClient(regClient),
+			WithGitHubClient(ghClient),
+		)
+
+		res, err := p.Run(context.Background())
+		if err == nil {
+			t.Fatal("expected error from Run, got nil")
+		}
+		if res.Status != StatusHardFailure {
+			t.Fatalf("expected StatusHardFailure (1) for 422 error, got %v", res.Status)
+		}
+	})
 }

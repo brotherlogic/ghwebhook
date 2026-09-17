@@ -156,6 +156,9 @@ func TestDefaultGitHubIssueClient_LiveHttpEndpoints(t *testing.T) {
 			if !strings.Contains(q, "repo:brotherlogic/ghwebhook") {
 				t.Errorf("expected search query to scope repo, got q=%q", q)
 			}
+			if !strings.Contains(q, "is:issue") {
+				t.Errorf("expected search query to specify is:issue, got q=%q", q)
+			}
 			result := github.IssuesSearchResult{
 				Total: github.Ptr(1),
 				Issues: []*github.Issue{
@@ -237,5 +240,68 @@ func TestDefaultGitHubIssueClient_LiveHttpEndpoints(t *testing.T) {
 	}
 	if closed.GetState() != "closed" {
 		t.Fatalf("unexpected closed issue: %+v", closed)
+	}
+}
+
+func TestDefaultGitHubIssueClient_SearchQueryFormatting(t *testing.T) {
+	var capturedQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		capturedQuery = r.URL.Query().Get("q")
+		_ = json.NewEncoder(w).Encode(github.IssuesSearchResult{})
+	}))
+	defer ts.Close()
+
+	gh := github.NewClient(ts.Client())
+	gh.BaseURL, _ = gh.BaseURL.Parse(ts.URL + "/")
+	client := prober.NewGitHubIssueClientFromClient(gh)
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		owner      string
+		repo       string
+		query      string
+		wantSubstr []string
+	}{
+		{
+			name:       "bare query adds repo and is:issue",
+			owner:      "brotherlogic",
+			repo:       "ghwebhook",
+			query:      "PROBER TEST",
+			wantSubstr: []string{"repo:brotherlogic/ghwebhook", "is:issue", "PROBER TEST"},
+		},
+		{
+			name:       "query already containing is:issue does not duplicate",
+			owner:      "brotherlogic",
+			repo:       "ghwebhook",
+			query:      "is:issue PROBER TEST",
+			wantSubstr: []string{"repo:brotherlogic/ghwebhook", "is:issue", "PROBER TEST"},
+		},
+		{
+			name:       "query already containing is:pull-request does not add is:issue",
+			owner:      "brotherlogic",
+			repo:       "ghwebhook",
+			query:      "is:pull-request PROBER TEST",
+			wantSubstr: []string{"repo:brotherlogic/ghwebhook", "is:pull-request"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capturedQuery = ""
+			_, err := client.SearchIssues(ctx, tt.owner, tt.repo, tt.query)
+			if err != nil {
+				t.Fatalf("SearchIssues error: %v", err)
+			}
+			for _, substr := range tt.wantSubstr {
+				if !strings.Contains(capturedQuery, substr) {
+					t.Errorf("capturedQuery = %q, want substring %q", capturedQuery, substr)
+				}
+			}
+			if strings.Count(capturedQuery, "is:issue") > 1 {
+				t.Errorf("is:issue duplicated in query: %q", capturedQuery)
+			}
+		})
 	}
 }
