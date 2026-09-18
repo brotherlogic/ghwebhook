@@ -1215,5 +1215,72 @@ func TestRun_RealServeMetricsUntilScraped_Integration(t *testing.T) {
 	}
 }
 
+func TestRunWithProber_WiresGitHubHookClient(t *testing.T) {
+	cfg := &Config{
+		Repo:          "brotherlogic/ghwebhook",
+		GHWebhookAddr: "localhost:50051",
+		ListenAddr:    "127.0.0.1:0",
+		ServiceAddr:   "127.0.0.1:0",
+		Timeout:       100 * time.Millisecond,
+		GitHubToken:   "test-token-for-hook-wiring",
+	}
 
+	var capturedHookClient prober.GitHubHookClient
+	captureOpt := func(p *prober.Prober) {
+		capturedHookClient = p.HookClient()
+	}
 
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return nil, errors.New("transient error")
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	var stdout, stderr bytes.Buffer
+	_ = runWithProber(context.Background(), cfg, &stdout, &stderr,
+		captureOpt,
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+	)
+
+	if capturedHookClient == nil {
+		t.Fatalf("expected prober to have a non-nil GitHubHookClient wired by runWithProber, got nil")
+	}
+}
+
+func TestRunWithProber_ExtraOptsOverrideHookClient(t *testing.T) {
+	cfg := &Config{
+		Repo:          "brotherlogic/ghwebhook",
+		GHWebhookAddr: "localhost:50051",
+		ListenAddr:    "127.0.0.1:0",
+		ServiceAddr:   "127.0.0.1:0",
+		Timeout:       100 * time.Millisecond,
+		GitHubToken:   "test-token-for-hook-wiring",
+	}
+
+	explicitMockHook := &prober.MockGitHubHookClient{}
+	var capturedHookClient prober.GitHubHookClient
+	captureOpt := func(p *prober.Prober) {
+		capturedHookClient = p.HookClient()
+	}
+
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return nil, errors.New("transient error")
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	var stdout, stderr bytes.Buffer
+	_ = runWithProber(context.Background(), cfg, &stdout, &stderr,
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(explicitMockHook),
+		captureOpt,
+	)
+
+	if capturedHookClient != explicitMockHook {
+		t.Fatalf("expected explicit WithHookClient from extraOpts to take precedence, got %v", capturedHookClient)
+	}
+}
