@@ -32,6 +32,7 @@ type Config struct {
 	GHWebhookAddr      string
 	ListenAddr         string
 	ServiceAddr        string
+	IngressURL         string
 	Timeout            time.Duration
 	GitHubToken        string
 	MetricsAddr        string
@@ -63,6 +64,8 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 	if serviceAddr == "" {
 		serviceAddr = prober.DefaultServiceAddr
 	}
+
+	ingressURL := getenv("PROBER_INGRESS_URL")
 
 	timeoutStr := getenv("PROBER_TIMEOUT")
 	timeout := prober.DefaultTimeout
@@ -99,6 +102,7 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.StringVar(&ghwebhookAddr, "ghwebhook-addr", ghwebhookAddr, "Address of ghwebhook registration gRPC service")
 	fs.StringVar(&listenAddr, "listen-addr", listenAddr, "Local address for WebhookHandler gRPC server")
 	fs.StringVar(&serviceAddr, "service-addr", serviceAddr, "Service address advertised to ghwebhook")
+	fs.StringVar(&ingressURL, "ingress-url", ingressURL, "Target ingress URL configured for webhooks")
 	fs.DurationVar(&timeout, "timeout", timeout, "Maximum execution timeout for the probe")
 	fs.StringVar(&token, "github-token", token, "GitHub API token")
 	fs.StringVar(&metricsAddr, "metrics-addr", metricsAddr, "Address for Prometheus metrics scrape server")
@@ -117,6 +121,7 @@ func parseConfig(args []string, getenv func(string) string) (*Config, error) {
 		GHWebhookAddr:      ghwebhookAddr,
 		ListenAddr:         listenAddr,
 		ServiceAddr:        serviceAddr,
+		IngressURL:         ingressURL,
 		Timeout:            timeout,
 		GitHubToken:        token,
 		MetricsAddr:        metricsAddr,
@@ -238,6 +243,7 @@ func runWithProberAndClient(ctx context.Context, cfg *Config, ghClient prober.Gi
 		prober.WithGHWebhookAddr(cfg.GHWebhookAddr),
 		prober.WithListenAddr(cfg.ListenAddr),
 		prober.WithServiceAddr(cfg.ServiceAddr),
+		prober.WithIngressURL(cfg.IngressURL),
 		prober.WithTimeout(cfg.Timeout),
 	}
 	if ghClient != nil {
