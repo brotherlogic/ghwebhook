@@ -23,15 +23,36 @@ import (
 var (
 	origRecordResult             = prober.RecordResult
 	origServeMetricsUntilScraped = prober.ServeMetricsUntilScraped
+	origNewDefaultGitHubHookClient = newDefaultGitHubHookClient
 )
+
+func defaultTestHookClient() prober.GitHubHookClient {
+	hookID := int64(1)
+	active := true
+	return &prober.MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"issues"},
+				},
+			}, nil
+		},
+	}
+}
 
 func TestMain(m *testing.M) {
 	serveMetricsUntilScrapedFunc = func(ctx context.Context, addr string, timeout time.Duration) error {
 		return nil
 	}
+	newDefaultGitHubHookClient = func(token string) prober.GitHubHookClient {
+		return defaultTestHookClient()
+	}
 	code := m.Run()
 	serveMetricsUntilScrapedFunc = origServeMetricsUntilScraped
 	recordResultFunc = origRecordResult
+	newDefaultGitHubHookClient = origNewDefaultGitHubHookClient
 	os.Exit(code)
 }
 
@@ -337,6 +358,7 @@ func TestRun_Success_WithDispatchedEvent(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	go func() {
@@ -407,6 +429,7 @@ func TestRun_Success_ExitZero(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	go func() {
@@ -465,6 +488,7 @@ func TestRun_SoftFailure_ExitZero(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -771,6 +795,7 @@ func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_Success(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	go func() {
@@ -870,6 +895,7 @@ func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_SoftFailure(t *testing.
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var recordedResult prober.Result
