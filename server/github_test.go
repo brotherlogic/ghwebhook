@@ -14,6 +14,7 @@ import (
 type mockGitHubHookClient struct {
 	listHooksFunc  func(ctx context.Context, owner, repo string) ([]*github.Hook, error)
 	deleteHookFunc func(ctx context.Context, owner, repo string, hookID int64) error
+	createHookFunc func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error)
 }
 
 func (m *mockGitHubHookClient) ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
@@ -28,6 +29,13 @@ func (m *mockGitHubHookClient) DeleteHook(ctx context.Context, owner, repo strin
 		return m.deleteHookFunc(ctx, owner, repo, hookID)
 	}
 	return nil
+}
+
+func (m *mockGitHubHookClient) CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+	if m.createHookFunc != nil {
+		return m.createHookFunc(ctx, owner, repo, hook)
+	}
+	return nil, nil
 }
 
 func TestGitHubHookClient_Mock(t *testing.T) {
@@ -50,6 +58,13 @@ func TestGitHubHookClient_Mock(t *testing.T) {
 			}
 			return nil
 		},
+		createHookFunc: func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+			id := int64(67890)
+			return &github.Hook{
+				ID:     &id,
+				Config: hook.Config,
+			}, nil
+		},
 	}
 
 	hooks, err := client.ListHooks(context.Background(), "owner", "repo")
@@ -63,6 +78,19 @@ func TestGitHubHookClient_Mock(t *testing.T) {
 	err = client.DeleteHook(context.Background(), "owner", "repo", 12345)
 	if err != nil {
 		t.Fatalf("DeleteHook failed: %v", err)
+	}
+
+	hookURL := "https://example.com/new-webhook"
+	newHook, err := client.CreateHook(context.Background(), "owner", "repo", &github.Hook{
+		Config: &github.HookConfig{
+			URL: &hookURL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateHook failed: %v", err)
+	}
+	if newHook == nil || *newHook.ID != 67890 || *newHook.Config.URL != hookURL {
+		t.Errorf("unexpected created hook result: %+v", newHook)
 	}
 }
 
@@ -111,6 +139,12 @@ func TestDefaultGitHubHookClient_LiveEndpoints(t *testing.T) {
 			w.Write([]byte(`[{"id": 42, "config": {"url": "https://example.com/hook"}}]`))
 			return
 		}
+		if r.URL.Path == "/repos/testowner/testrepo/hooks" && r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			w.Write([]byte(`{"id": 99, "config": {"url": "https://example.com/created-hook"}}`))
+			return
+		}
 		if r.URL.Path == "/repos/testowner/testrepo/hooks/42" && r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -129,6 +163,19 @@ func TestDefaultGitHubHookClient_LiveEndpoints(t *testing.T) {
 	}
 	if len(hooks) != 1 || *hooks[0].ID != 42 {
 		t.Fatalf("unexpected hooks response: %+v", hooks)
+	}
+
+	newHookURL := "https://example.com/created-hook"
+	created, err := client.CreateHook(context.Background(), "testowner", "testrepo", &github.Hook{
+		Config: &github.HookConfig{
+			URL: &newHookURL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateHook failed: %v", err)
+	}
+	if created == nil || *created.ID != 99 {
+		t.Fatalf("unexpected created hook response: %+v", created)
 	}
 
 	err = client.DeleteHook(context.Background(), "testowner", "testrepo", 42)

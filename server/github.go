@@ -10,6 +10,7 @@ import (
 type GitHubHookClient interface {
 	ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error)
 	DeleteHook(ctx context.Context, owner, repo string, hookID int64) error
+	CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error)
 }
 
 type defaultGitHubHookClient struct {
@@ -40,4 +41,9 @@ func (d *defaultGitHubHookClient) ListHooks(ctx context.Context, owner, repo str
 func (d *defaultGitHubHookClient) DeleteHook(ctx context.Context, owner, repo string, hookID int64) error {
 	_, err := d.client.Repositories.DeleteHook(ctx, owner, repo, hookID)
 	return err
+}
+
+func (d *defaultGitHubHookClient) CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+	created, _, err := d.client.Repositories.CreateHook(ctx, owner, repo, hook)
+	return created, err
 }
