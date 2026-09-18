@@ -385,6 +385,22 @@ func (m *mockRegistrationServiceClient) Unregister(ctx context.Context, in *pb.U
 	return &pb.UnregisterResponse{Success: true}, nil
 }
 
+func mockActiveHookClient() *MockGitHubHookClient {
+	hookID := int64(1)
+	active := true
+	return &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"issues"},
+				},
+			}, nil
+		},
+	}
+}
+
 func TestProber_Success_CreatedIssue(t *testing.T) {
 	var registeredRepo, registeredAddr string
 	var unregisteredRepo, unregisteredAddr string
@@ -437,6 +453,7 @@ func TestProber_Success_CreatedIssue(t *testing.T) {
 		WithTimeout(2*time.Second),
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	// In a goroutine, simulate ghwebhook delivering the matching webhook event
@@ -527,6 +544,7 @@ func TestProber_Success_ReopenedIssue(t *testing.T) {
 		WithTimeout(2*time.Second),
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	go func() {
@@ -597,6 +615,7 @@ func TestProber_Success_ClosedIssue(t *testing.T) {
 		WithTimeout(2*time.Second),
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	go func() {
@@ -659,6 +678,7 @@ func TestProber_HardFailure_Timeout(t *testing.T) {
 		WithTimeout(100*time.Millisecond), // Short timeout
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	res, err := p.Run(context.Background())
@@ -683,6 +703,7 @@ func TestProber_SoftFailure_GitHubRateLimit(t *testing.T) {
 		WithTimeout(5*time.Second),
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	start := time.Now()
@@ -739,6 +760,7 @@ func TestProber_CleanupResilience(t *testing.T) {
 		WithTimeout(100*time.Millisecond),
 		WithRegistrationClient(regClient),
 		WithGitHubClient(ghClient),
+		WithHookClient(mockActiveHookClient()),
 	)
 
 	// Run should timeout (Hard Failure), but deferred cleanup MUST unregister and close the opened issue
@@ -978,6 +1000,7 @@ func TestProber_HardFailure_GitHub422(t *testing.T) {
 			WithTimeout(5*time.Second),
 			WithRegistrationClient(regClient),
 			WithGitHubClient(ghClient),
+			WithHookClient(mockActiveHookClient()),
 		)
 
 		res, err := p.Run(context.Background())
@@ -1008,6 +1031,7 @@ func TestProber_HardFailure_GitHub422(t *testing.T) {
 			WithTimeout(5*time.Second),
 			WithRegistrationClient(regClient),
 			WithGitHubClient(ghClient),
+			WithHookClient(mockActiveHookClient()),
 		)
 
 		res, err := p.Run(context.Background())
@@ -1051,6 +1075,7 @@ func TestProber_HardFailure_GitHub422(t *testing.T) {
 			WithTimeout(5*time.Second),
 			WithRegistrationClient(regClient),
 			WithGitHubClient(ghClient),
+			WithHookClient(mockActiveHookClient()),
 		)
 
 		res, err := p.Run(context.Background())
@@ -1459,5 +1484,275 @@ func TestProber_Run_ContextCancelled_SkipsInspection(t *testing.T) {
 	if res.Diagnostics != nil {
 		t.Errorf("expected nil Diagnostics when context is cancelled, got %v", res.Diagnostics)
 	}
+}
+
+func TestRun_FailsFast_WhenWebhookMissingPostRegistration(t *testing.T) {
+	var unregistered bool
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{Success: true}, nil
+		},
+		unregisterFunc: func(ctx context.Context, in *pb.UnregisterRequest, opts ...grpc.CallOption) (*pb.UnregisterResponse, error) {
+			unregistered = true
+			return &pb.UnregisterResponse{Success: true}, nil
+		},
+	}
+
+	issueAPICalled := false
+	ghClient := &MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			issueAPICalled = true
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			issueAPICalled = true
+			return nil, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			issueAPICalled = true
+			return nil, nil
+		},
+	}
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithIngressURL("https://example.com/webhook"),
+		WithTimeout(10*time.Second),
+		WithRegistrationClient(regClient),
+		WithGitHubClient(ghClient),
+		WithHookClient(hookClient),
+	)
+
+	start := time.Now()
+	res, _ := p.Run(context.Background())
+	duration := time.Since(start)
+
+	if duration > 2*time.Second {
+		t.Errorf("Prober should fail fast without waiting for timeout, took %v", duration)
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	if res.Diagnostics == nil {
+		t.Fatal("expected non-nil Diagnostics on early abort")
+	}
+	if res.Diagnostics.RootCause != RootCauseWebhookMissing {
+		t.Errorf("res.Diagnostics.RootCause = %q, want %q", res.Diagnostics.RootCause, RootCauseWebhookMissing)
+	}
+	expectedDetail := "no active webhook configured for ghwebhook found on repository following registration"
+	if res.Diagnostics.RootCauseDetail != expectedDetail {
+		t.Errorf("res.Diagnostics.RootCauseDetail = %q, want %q", res.Diagnostics.RootCauseDetail, expectedDetail)
+	}
+	if res.Diagnostics.ActiveHooksCount != 0 {
+		t.Errorf("res.Diagnostics.ActiveHooksCount = %d, want 0", res.Diagnostics.ActiveHooksCount)
+	}
+	if issueAPICalled {
+		t.Error("expected GitHub issue APIs NOT to be called when webhook is missing")
+	}
+	if !unregistered {
+		t.Error("expected unregister to be executed on early abort")
+	}
+}
+
+func TestRun_FailsFast_WhenInspectionPermissionDenied(t *testing.T) {
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{Success: true}, nil
+		},
+	}
+
+	issueAPICalled := false
+	ghClient := &MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			issueAPICalled = true
+			return []*github.Issue{}, nil
+		},
+	}
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return nil, &github.ErrorResponse{
+				Response: &http.Response{
+					StatusCode: http.StatusForbidden,
+				},
+				Message: "Resource not accessible by integration",
+			}
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithTimeout(10*time.Second),
+		WithRegistrationClient(regClient),
+		WithGitHubClient(ghClient),
+		WithHookClient(hookClient),
+	)
+
+	start := time.Now()
+	res, _ := p.Run(context.Background())
+	duration := time.Since(start)
+
+	if duration > 2*time.Second {
+		t.Errorf("Prober should fail fast without waiting for timeout, took %v", duration)
+	}
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	if res.Diagnostics == nil {
+		t.Fatal("expected non-nil Diagnostics on permission denied abort")
+	}
+	if res.Diagnostics.RootCause != RootCauseInspectionUnavailable {
+		t.Errorf("res.Diagnostics.RootCause = %q, want %q", res.Diagnostics.RootCause, RootCauseInspectionUnavailable)
+	}
+	expectedDetail := "insufficient token permissions to inspect repository webhooks (admin:repo_hook required)"
+	if res.Diagnostics.RootCauseDetail != expectedDetail {
+		t.Errorf("res.Diagnostics.RootCauseDetail = %q, want %q", res.Diagnostics.RootCauseDetail, expectedDetail)
+	}
+	if issueAPICalled {
+		t.Error("expected GitHub issue APIs NOT to be called when permission denied")
+	}
+}
+
+func TestRun_Succeeds_WhenWebhookActive(t *testing.T) {
+	hookID := int64(456)
+	active := true
+	ingressURL := "https://webhook.brotherlogic-infra.net/event"
+
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{Success: true}, nil
+		},
+		unregisterFunc: func(ctx context.Context, in *pb.UnregisterRequest, opts ...grpc.CallOption) (*pb.UnregisterResponse, error) {
+			return &pb.UnregisterResponse{Success: true}, nil
+		},
+	}
+
+	issueNum := 202
+	ghClient := &MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			state := "open"
+			title := req.GetTitle()
+			num := issueNum
+			return &github.Issue{Number: &num, State: &state, Title: &title}, nil
+		},
+		EditIssueFunc: func(ctx context.Context, owner, repo string, number int, req *github.IssueRequest) (*github.Issue, error) {
+			state := req.GetState()
+			return &github.Issue{Number: &number, State: &state}, nil
+		},
+	}
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					ID:     &hookID,
+					Active: &active,
+					Events: []string{"issues"},
+					Config: &github.HookConfig{
+						URL: github.Ptr(ingressURL),
+					},
+				},
+			}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithIngressURL(ingressURL),
+		WithTimeout(3*time.Second),
+		WithRegistrationClient(regClient),
+		WithGitHubClient(ghClient),
+		WithHookClient(hookClient),
+	)
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		p.eventCh <- &pb.WebhookEvent{
+			Header: &pb.EventHeader{EventType: "issues"},
+			Payload: &pb.WebhookEvent_Issue{
+				Issue: &pb.IssueEvent{
+					Action: "opened",
+					Number: int32(issueNum),
+					Title:  "PROBER TEST",
+					Repository: &pb.Repository{
+						FullName: "brotherlogic/ghwebhook",
+					},
+				},
+			},
+		}
+	}()
+
+	res, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Prober.Run failed: %v", err)
+	}
+	if res.Status != StatusSuccess {
+		t.Fatalf("res.Status = %v, want StatusSuccess", res.Status)
+	}
+	if res.IssueNumber != issueNum {
+		t.Errorf("res.IssueNumber = %d, want %d", res.IssueNumber, issueNum)
+	}
+}
+
+func TestRun_CleansUpDeferredResources_OnEarlyAbort(t *testing.T) {
+	var unregistered bool
+	regClient := &mockRegistrationServiceClient{
+		registerFunc: func(ctx context.Context, in *pb.RegistrationRequest, opts ...grpc.CallOption) (*pb.RegistrationResponse, error) {
+			return &pb.RegistrationResponse{Success: true}, nil
+		},
+		unregisterFunc: func(ctx context.Context, in *pb.UnregisterRequest, opts ...grpc.CallOption) (*pb.UnregisterResponse, error) {
+			unregistered = true
+			return &pb.UnregisterResponse{Success: true}, nil
+		},
+	}
+
+	hookClient := &MockGitHubHookClient{
+		ListHooksFunc: func(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+			return []*github.Hook{}, nil
+		},
+	}
+
+	p := NewProber(
+		WithRepo("brotherlogic/ghwebhook"),
+		WithTargetTitle("PROBER TEST"),
+		WithListenAddr("127.0.0.1:0"),
+		WithServiceAddr("127.0.0.1:0"),
+		WithTimeout(5*time.Second),
+		WithRegistrationClient(regClient),
+		WithHookClient(hookClient),
+	)
+
+	res, _ := p.Run(context.Background())
+	if res.Status != StatusHardFailure {
+		t.Fatalf("res.Status = %v, want StatusHardFailure", res.Status)
+	}
+	if !unregistered {
+		t.Error("expected regClient.Unregister to be called upon early abort")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := p.StartGRPCServer(ctx); err != nil {
+		t.Errorf("expected prober gRPC server to be stopped and restartable, got err: %v", err)
+	}
+	p.StopGRPCServer()
 }
 
