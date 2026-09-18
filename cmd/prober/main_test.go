@@ -985,6 +985,7 @@ func TestRun_Pipeline_InvokesRecordResultAndServeMetrics_HardFailure(t *testing.
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var recordedResult prober.Result
