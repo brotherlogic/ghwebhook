@@ -554,6 +554,7 @@ func TestRun_HardFailure_AlertCreated_ExitZero(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -619,6 +620,7 @@ func TestRun_HardFailure_AlertDeduplicated_ExitZero(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -670,6 +672,7 @@ func TestRun_HardFailure_AlertFailed_ExitOne(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	var stdout, stderr bytes.Buffer
@@ -1057,6 +1060,7 @@ func TestRun_MetricsScrapeServerError_DoesNotAlterExitCode_Success(t *testing.T)
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	go func() {
@@ -1132,6 +1136,7 @@ func TestRun_MetricsScrapeServerError_DoesNotAlterExitCode_HardFailureAlertFailu
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	origServe := serveMetricsUntilScrapedFunc
@@ -1204,6 +1209,7 @@ func TestRun_RealServeMetricsUntilScraped_Integration(t *testing.T) {
 		prober.WithTimeout(cfg.Timeout),
 		prober.WithGitHubClient(mockGH),
 		prober.WithRegistrationClient(mockReg),
+		prober.WithHookClient(defaultTestHookClient()),
 	)
 
 	scraped := make(chan bool, 1)
