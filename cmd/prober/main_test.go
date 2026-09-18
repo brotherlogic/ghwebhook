@@ -677,7 +677,7 @@ func TestParseConfig_MetricsDefaults(t *testing.T) {
 
 func TestParseConfig_MetricsEnvVars(t *testing.T) {
 	env := map[string]string{
-		"GH_TOKEN":                     "default-token",
+		"GH_TOKEN":                    "default-token",
 		"PROBER_METRICS_ADDR":         ":9090",
 		"PROBER_METRICS_HOLD_TIMEOUT": "15s",
 	}
@@ -698,7 +698,7 @@ func TestParseConfig_MetricsEnvVars(t *testing.T) {
 
 func TestParseConfig_MetricsFlagOverrides(t *testing.T) {
 	env := map[string]string{
-		"GH_TOKEN":                     "default-token",
+		"GH_TOKEN":                    "default-token",
 		"PROBER_METRICS_ADDR":         ":9090",
 		"PROBER_METRICS_HOLD_TIMEOUT": "15s",
 	}
@@ -724,7 +724,7 @@ func TestParseConfig_MetricsFlagOverrides(t *testing.T) {
 
 func TestParseConfig_InvalidMetricsHoldTimeout(t *testing.T) {
 	env := map[string]string{
-		"GH_TOKEN":                     "default-token",
+		"GH_TOKEN":                    "default-token",
 		"PROBER_METRICS_HOLD_TIMEOUT": "invalid-duration",
 	}
 	getenv := func(key string) string { return env[key] }
@@ -1282,5 +1282,78 @@ func TestRunWithProber_ExtraOptsOverrideHookClient(t *testing.T) {
 
 	if capturedHookClient != explicitMockHook {
 		t.Fatalf("expected explicit WithHookClient from extraOpts to take precedence, got %v", capturedHookClient)
+	}
+}
+
+func TestParseConfig_IngressURLEnvVar(t *testing.T) {
+	env := map[string]string{
+		"GH_TOKEN":           "test-token",
+		"PROBER_INGRESS_URL": "https://env.example.com/ingress",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	cfg, err := parseConfig([]string{}, getenv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.IngressURL != "https://env.example.com/ingress" {
+		t.Errorf("expected IngressURL %q, got %q", "https://env.example.com/ingress", cfg.IngressURL)
+	}
+}
+
+func TestParseConfig_IngressURLFlagOverrides(t *testing.T) {
+	env := map[string]string{
+		"GH_TOKEN":           "test-token",
+		"PROBER_INGRESS_URL": "https://env.example.com/ingress",
+	}
+	getenv := func(key string) string { return env[key] }
+
+	args := []string{
+		"--ingress-url=https://flag.example.com/ingress",
+	}
+
+	cfg, err := parseConfig(args, getenv)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.IngressURL != "https://flag.example.com/ingress" {
+		t.Errorf("expected IngressURL %q, got %q", "https://flag.example.com/ingress", cfg.IngressURL)
+	}
+}
+
+func TestRunWithProber_WiresIngressURL(t *testing.T) {
+	cfg := &Config{
+		Repo:          "brotherlogic/ghwebhook",
+		GHWebhookAddr: "localhost:50051",
+		ListenAddr:    "127.0.0.1:0",
+		ServiceAddr:   "127.0.0.1:0",
+		Timeout:       100 * time.Millisecond,
+		GitHubToken:   "test-token",
+		IngressURL:    "https://prober.example.com/ingress",
+	}
+
+	var capturedIngressURL string
+	captureOpt := func(p *prober.Prober) {
+		capturedIngressURL = p.IngressURL()
+	}
+
+	mockGH := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return nil, errors.New("transient error")
+		},
+	}
+	mockReg := &mockRegistrationClient{}
+
+	var stdout, stderr bytes.Buffer
+	_ = runWithProber(context.Background(), cfg, &stdout, &stderr,
+		prober.WithGitHubClient(mockGH),
+		prober.WithRegistrationClient(mockReg),
+		captureOpt,
+	)
+
+	if capturedIngressURL != "https://prober.example.com/ingress" {
+		t.Fatalf("expected captured IngressURL %q, got %q", "https://prober.example.com/ingress", capturedIngressURL)
 	}
 }

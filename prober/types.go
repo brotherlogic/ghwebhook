@@ -107,6 +107,7 @@ type Prober struct {
 	ghwebhookAddr     string
 	listenAddr        string
 	serviceAddr       string
+	ingressURL        string
 	timeout           time.Duration
 	eventCh           chan *pb.WebhookEvent
 	grpcServer        *grpc.Server
@@ -163,6 +164,13 @@ func WithListenAddr(addr string) Option {
 func WithServiceAddr(addr string) Option {
 	return func(p *Prober) {
 		p.serviceAddr = addr
+	}
+}
+
+// WithIngressURL configures the ingress URL for webhook deliveries.
+func WithIngressURL(url string) Option {
+	return func(p *Prober) {
+		p.ingressURL = url
 	}
 }
 
@@ -239,6 +247,13 @@ func (p *Prober) RepoFullName() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.repoFullName
+}
+
+// IngressURL returns the configured ingress URL on the Prober.
+func (p *Prober) IngressURL() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ingressURL
 }
 
 // NewProber creates a new Prober instance initialized with defaults and overridden by options.

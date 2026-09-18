@@ -303,3 +303,11 @@ func TestWithHookClient(t *testing.T) {
 	}
 }
 
+func TestWithIngressURL(t *testing.T) {
+	testURL := "https://webhook.example.com/webhook"
+	p := NewProber(WithIngressURL(testURL))
+
+	if p.IngressURL() != testURL {
+		t.Errorf("p.IngressURL() = %q, want %q", p.IngressURL(), testURL)
+	}
+}
