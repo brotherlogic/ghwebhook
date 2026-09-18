@@ -37,6 +37,7 @@ func main() {
 		ps,
 		server.WithGitHubClient(ghClient),
 		server.WithIngressURL(ingressURL),
+		server.WithWebhookSecret(os.Getenv("GH_WEBHOOK_SECRET")),
 	)
 
 	// Scan existing registrations to initialize metrics

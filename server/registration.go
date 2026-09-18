@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +33,11 @@ type Server struct {
 	strikeLock sync.Mutex
 	strikes    map[string]int
 
-	ghClient   GitHubHookClient
-	ingressURL string
+	ghClient      GitHubHookClient
+	ingressURL    string
+	webhookSecret string
+
+	repoLocks sync.Map
 
 	// Configurable for testing
 	backoffs []time.Duration
@@ -56,12 +60,20 @@ func WithIngressURL(ingressURL string) ServerOption {
 	}
 }
 
+// WithWebhookSecret configures the webhook secret for the Server.
+func WithWebhookSecret(secret string) ServerOption {
+	return func(s *Server) {
+		s.webhookSecret = secret
+	}
+}
+
 func NewServer(pstore pstore_client.PStoreClient, opts ...ServerOption) *Server {
 	s := &Server{
-		pstore:   pstore,
-		conns:    make(map[string]pb.WebhookHandlerClient),
-		strikes:  make(map[string]int),
-		backoffs: []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 60 * time.Second},
+		pstore:        pstore,
+		conns:         make(map[string]pb.WebhookHandlerClient),
+		strikes:       make(map[string]int),
+		backoffs:      []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 60 * time.Second},
+		webhookSecret: os.Getenv("GH_WEBHOOK_SECRET"),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -79,7 +91,94 @@ func (s *Server) GetIngressURL() string {
 	return s.ingressURL
 }
 
+// GetWebhookSecret returns the configured webhook secret.
+func (s *Server) GetWebhookSecret() string {
+	return s.webhookSecret
+}
+
+func (s *Server) getRepoLock(repo string) *sync.Mutex {
+	val, _ := s.repoLocks.LoadOrStore(repo, &sync.Mutex{})
+	return val.(*sync.Mutex)
+}
+
+func isGitHubHookAlreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errResp *github.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == http.StatusUnprocessableEntity {
+		return true
+	}
+	if strings.Contains(err.Error(), "Hook already exists") || (strings.Contains(err.Error(), "422") && strings.Contains(strings.ToLower(err.Error()), "already exists")) {
+		return true
+	}
+	return false
+}
+
 func (s *Server) Register(ctx context.Context, req *pb.RegistrationRequest) (*pb.RegistrationResponse, error) {
+	if req == nil || req.GetRepoFullName() == "" || req.GetServiceAddress() == "" {
+		return &pb.RegistrationResponse{Success: false, Message: "repo_full_name and service_address must be provided"}, nil
+	}
+
+	parts := strings.Split(req.RepoFullName, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return &pb.RegistrationResponse{Success: false, Message: fmt.Sprintf("invalid repository full name %q, expected format owner/repo", req.RepoFullName)}, nil
+	}
+	owner, repo := parts[0], parts[1]
+
+	if s.ghClient == nil || s.ingressURL == "" || s.webhookSecret == "" {
+		return &pb.RegistrationResponse{Success: false, Message: "github client, ingress URL, and webhook secret must be configured"}, nil
+	}
+
+	mu := s.getRepoLock(req.RepoFullName)
+	mu.Lock()
+	defer mu.Unlock()
+
+	hooks, err := s.ghClient.ListHooks(ctx, owner, repo)
+	if err != nil {
+		log.Printf("Registration failed for %s: error listing hooks: %v", req.RepoFullName, err)
+		return &pb.RegistrationResponse{Success: false, Message: fmt.Sprintf("failed to list hooks: %v", err)}, nil
+	}
+
+	hookExists := false
+	for _, h := range hooks {
+		if h == nil || !h.GetActive() {
+			continue
+		}
+		var hookURL string
+		if h.Config != nil {
+			if h.Config.URL != nil {
+				hookURL = *h.Config.URL
+			} else {
+				hookURL = h.Config.GetURL()
+			}
+		}
+		if hookURL == s.ingressURL {
+			hookExists = true
+			break
+		}
+	}
+
+	if !hookExists {
+		newHook := &github.Hook{
+			Active: github.Ptr(true),
+			Events: []string{"*"},
+			Config: &github.HookConfig{
+				URL:         github.Ptr(s.ingressURL),
+				ContentType: github.Ptr("json"),
+				Secret:      github.Ptr(s.webhookSecret),
+			},
+		}
+		_, err := s.ghClient.CreateHook(ctx, owner, repo, newHook)
+		if err != nil {
+			if !isGitHubHookAlreadyExists(err) {
+				log.Printf("Registration failed for %s: error creating hook: %v", req.RepoFullName, err)
+				return &pb.RegistrationResponse{Success: false, Message: fmt.Sprintf("failed to create hook: %v", err)}, nil
+			}
+			log.Printf("Webhook already exists for %s (HTTP 422 race condition), proceeding with registration", req.RepoFullName)
+		}
+	}
+
 	key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
 
 	val, err := anypb.New(req)

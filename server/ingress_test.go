@@ -184,7 +184,7 @@ func TestWebhookIngressMetrics_UnknownEventType(t *testing.T) {
 
 func TestWebhookIngressMetrics_OutgoingDelivery(t *testing.T) {
 	// Register a fake handler
-	s := NewServer(pstore_client.GetTestClient())
+	s := newTestServer(pstore_client.GetTestClient())
 	s.backoffs = []time.Duration{10 * time.Millisecond} // fast retry
 
 	ctx := context.Background()
