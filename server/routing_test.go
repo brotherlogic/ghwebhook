@@ -49,7 +49,7 @@ func TestRouting_ConcurrentDelivery(t *testing.T) {
 	os.Setenv("GH_WEBHOOK_SECRET", secret)
 	defer os.Unsetenv("GH_WEBHOOK_SECRET")
 
-	s := NewServer(pstore_client.GetTestClient())
+	s := newTestServer(pstore_client.GetTestClient())
 
 	// 3. Register Services
 	repo := "repo/test"

@@ -26,9 +26,30 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func newTestServer(ps pstore_client.PStoreClient, opts ...ServerOption) *Server {
+	defaultOpts := []ServerOption{
+		WithGitHubClient(&mockGitHubHookClient{
+			listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+				return []*github.Hook{
+					{
+						Active: github.Ptr(true),
+						Config: &github.HookConfig{
+							URL: github.Ptr("https://example.com/webhook"),
+						},
+					},
+				}, nil
+			},
+		}),
+		WithIngressURL("https://example.com/webhook"),
+		WithWebhookSecret("test-secret"),
+	}
+	allOpts := append(defaultOpts, opts...)
+	return NewServer(ps, allOpts...)
+}
+
 func TestRegister(t *testing.T) {
 	// Initialize in-memory pstore client
-	s := NewServer(pstore_client.GetTestClient())
+	s := newTestServer(pstore_client.GetTestClient())
 
 	req := &pb.RegistrationRequest{
 		RepoFullName:   "brotherlogic/ghwebhook",
@@ -68,7 +89,7 @@ func TestRegister(t *testing.T) {
 }
 
 func TestGetRegistrations(t *testing.T) {
-	s := NewServer(pstore_client.GetTestClient())
+	s := newTestServer(pstore_client.GetTestClient())
 
 	repo := "brotherlogic/ghwebhook"
 	services := []string{"localhost:50051", "localhost:50052"}
@@ -132,7 +153,7 @@ func TestMetricsRegistered(t *testing.T) {
 
 func TestRegistrationMetrics(t *testing.T) {
 	ps := pstore_client.GetTestClient()
-	s := NewServer(ps)
+	s := newTestServer(ps)
 
 	repo := "metrics-test/repo"
 	addr := "127.0.0.1:9090"
@@ -217,11 +238,28 @@ func TestRegistrationMetrics(t *testing.T) {
 	if regVal != 0 {
 		t.Errorf("Expected RegistrationsTotal for removed client to be 0, got %f", regVal)
 	}
+
+	// 4. Test strikes reset upon re-registration
+	_, err = s.Register(context.Background(), &pb.RegistrationRequest{
+		RepoFullName:   repoStrikes,
+		ServiceAddress: testAddr,
+	})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", repoStrikes, testAddr)
+	s.strikeLock.Lock()
+	strikesRemaining := s.strikes[key]
+	s.strikeLock.Unlock()
+	if strikesRemaining != 0 {
+		t.Errorf("Expected in-memory strikes to be reset to 0, got %d", strikesRemaining)
+	}
 }
 
 func TestUnregister_Success(t *testing.T) {
 	ps := pstore_client.GetTestClient()
-	s := NewServer(ps)
+	s := newTestServer(ps)
 
 	repo := "brotherlogic/ghwebhook"
 	addr := "localhost:50051"
@@ -326,6 +364,14 @@ func TestUnregister_MultiServiceRetention(t *testing.T) {
 	ingressURL := "https://example.com/webhook"
 	var deleteCalled atomic.Bool
 	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			return []*github.Hook{
+				{
+					Active: github.Ptr(true),
+					Config: &github.HookConfig{URL: github.Ptr(ingressURL)},
+				},
+			}, nil
+		},
 		deleteHookFunc: func(ctx context.Context, owner, repo string, hookID int64) error {
 			deleteCalled.Store(true)
 			return nil
@@ -335,6 +381,7 @@ func TestUnregister_MultiServiceRetention(t *testing.T) {
 		ps,
 		WithGitHubClient(mockClient),
 		WithIngressURL(ingressURL),
+		WithWebhookSecret("test-secret"),
 	)
 
 	repo := "brotherlogic/ghwebhook"
@@ -427,7 +474,8 @@ func TestUnregister_LastServiceGitHubDeletion(t *testing.T) {
 					},
 				},
 				{
-					ID: &hookID,
+					ID:     &hookID,
+					Active: github.Ptr(true),
 					Config: &github.HookConfig{
 						URL: &url,
 					},
@@ -444,6 +492,7 @@ func TestUnregister_LastServiceGitHubDeletion(t *testing.T) {
 		ps,
 		WithGitHubClient(mockClient),
 		WithIngressURL(ingressURL),
+		WithWebhookSecret("test-secret"),
 	)
 	s.backoffs = []time.Duration{1 * time.Millisecond}
 
@@ -578,7 +627,12 @@ func TestUnregister_ConcurrencyGuard(t *testing.T) {
 	mockClient := &mockGitHubHookClient{
 		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
 			listCalled.Store(true)
-			return nil, nil
+			return []*github.Hook{
+				{
+					Active: github.Ptr(true),
+					Config: &github.HookConfig{URL: github.Ptr("https://example.com/webhook")},
+				},
+			}, nil
 		},
 	}
 
@@ -586,6 +640,7 @@ func TestUnregister_ConcurrencyGuard(t *testing.T) {
 		ps,
 		WithGitHubClient(mockClient),
 		WithIngressURL("https://example.com/webhook"),
+		WithWebhookSecret("test-secret"),
 	)
 
 	// Register a service before deletion check
@@ -596,6 +651,9 @@ func TestUnregister_ConcurrencyGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register failed: %v", err)
 	}
+
+	// Reset listCalled before calling deleteGitHubWebhook
+	listCalled.Store(false)
 
 	// Calling deleteGitHubWebhook should abort because registration exists
 	err = s.deleteGitHubWebhook(context.Background(), repo)
@@ -714,7 +772,8 @@ func TestUnregister_gRPCIntegration(t *testing.T) {
 			url := ingressURL
 			return []*github.Hook{
 				{
-					ID: &hookID,
+					ID:     &hookID,
+					Active: github.Ptr(true),
 					Config: &github.HookConfig{
 						URL: &url,
 					},
@@ -731,6 +790,7 @@ func TestUnregister_gRPCIntegration(t *testing.T) {
 		ps,
 		WithGitHubClient(mockClient),
 		WithIngressURL(ingressURL),
+		WithWebhookSecret("test-secret"),
 	)
 	srv.backoffs = []time.Duration{1 * time.Millisecond}
 
@@ -825,7 +885,7 @@ func TestRegister_PersistenceFailure_LogsError(t *testing.T) {
 			return nil, expectedErr
 		},
 	}
-	s := NewServer(mockPS)
+	s := newTestServer(mockPS)
 
 	var buf bytes.Buffer
 	origOutput := log.Writer()
@@ -863,7 +923,7 @@ func TestRegister_PersistenceFailure_LogsError(t *testing.T) {
 }
 
 func TestRegister_Success_Quiet(t *testing.T) {
-	s := NewServer(pstore_client.GetTestClient())
+	s := newTestServer(pstore_client.GetTestClient())
 
 	var buf bytes.Buffer
 	origOutput := log.Writer()
@@ -891,5 +951,377 @@ func TestRegister_Success_Quiet(t *testing.T) {
 
 	if buf.Len() != 0 {
 		t.Errorf("Expected quiet log output on success, got: %q", buf.String())
+	}
+}
+
+func TestRegister_ProvisionsWebhook_WhenMissing(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://ingress.example.com/webhook"
+	secret := "secret-12345"
+
+	var createdHook *github.Hook
+	var createdOwner, createdRepo string
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			return []*github.Hook{}, nil
+		},
+		createHookFunc: func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+			createdOwner = owner
+			createdRepo = repo
+			createdHook = hook
+			hookCopy := *hook
+			hookCopy.ID = github.Ptr(int64(1001))
+			return &hookCopy, nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+		WithWebhookSecret(secret),
+	)
+
+	req := &pb.RegistrationRequest{
+		RepoFullName:   "brotherlogic/ghwebhook",
+		ServiceAddress: "127.0.0.1:50051",
+	}
+
+	resp, err := s.Register(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Register returned unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("Register failed: %s", resp.Message)
+	}
+
+	if createdOwner != "brotherlogic" || createdRepo != "ghwebhook" {
+		t.Errorf("Expected CreateHook for brotherlogic/ghwebhook, got %s/%s", createdOwner, createdRepo)
+	}
+	if createdHook == nil {
+		t.Fatal("Expected CreateHook to be called, but it was not")
+	}
+	if !createdHook.GetActive() {
+		t.Errorf("Expected hook to be active")
+	}
+	if len(createdHook.Events) != 1 || createdHook.Events[0] != "*" {
+		t.Errorf("Expected events [*], got %v", createdHook.Events)
+	}
+	if createdHook.Config == nil {
+		t.Fatal("Expected hook config to be non-nil")
+	}
+	if createdHook.Config.GetURL() != ingressURL {
+		t.Errorf("Expected hook URL %q, got %q", ingressURL, createdHook.Config.GetURL())
+	}
+	if createdHook.Config.GetContentType() != "json" {
+		t.Errorf("Expected content-type json, got %q", createdHook.Config.GetContentType())
+	}
+	if createdHook.Config.GetSecret() != secret {
+		t.Errorf("Expected secret %q, got %q", secret, createdHook.Config.GetSecret())
+	}
+
+	// Verify pstore record exists
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
+	readResp, err := ps.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+	if err != nil || readResp.Value == nil || len(readResp.Value.Value) == 0 {
+		t.Fatalf("Expected registration key in pstore, got err=%v, value=%v", err, readResp)
+	}
+}
+
+func TestRegister_Idempotent_WhenWebhookAlreadyExists(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://ingress.example.com/webhook"
+	secret := "secret-idempotent"
+
+	createCalled := false
+	existingHook := &github.Hook{
+		ID:     github.Ptr(int64(2002)),
+		Active: github.Ptr(true),
+		Config: &github.HookConfig{
+			URL:         github.Ptr(ingressURL),
+			ContentType: github.Ptr("json"),
+		},
+	}
+
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			return []*github.Hook{existingHook}, nil
+		},
+		createHookFunc: func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+			createCalled = true
+			return nil, errors.New("should not be called")
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+		WithWebhookSecret(secret),
+	)
+
+	req := &pb.RegistrationRequest{
+		RepoFullName:   "brotherlogic/ghwebhook",
+		ServiceAddress: "127.0.0.1:50051",
+	}
+
+	resp, err := s.Register(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Register returned unexpected error: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("Register failed: %s", resp.Message)
+	}
+	if createCalled {
+		t.Errorf("CreateHook was unexpectedly called when active webhook already exists")
+	}
+
+	// Verify pstore record exists
+	key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
+	readResp, err := ps.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+	if err != nil || readResp.Value == nil || len(readResp.Value.Value) == 0 {
+		t.Fatalf("Expected registration key in pstore, got err=%v, value=%v", err, readResp)
+	}
+}
+
+func TestRegister_HandlesConcurrentRegistrations_Gracefully(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://ingress.example.com/webhook"
+	secret := "secret-concurrent"
+
+	var createCalls atomic.Int32
+	mockClient := &mockGitHubHookClient{
+		listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+			// Initially no hooks
+			if createCalls.Load() > 0 {
+				return []*github.Hook{
+					{
+						ID:     github.Ptr(int64(3003)),
+						Active: github.Ptr(true),
+						Config: &github.HookConfig{URL: github.Ptr(ingressURL)},
+					},
+				}, nil
+			}
+			return []*github.Hook{}, nil
+		},
+		createHookFunc: func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+			count := createCalls.Add(1)
+			if count > 1 {
+				// Simulate GitHub 422 Validation Failed race
+				return nil, &github.ErrorResponse{
+					Response: &http.Response{StatusCode: http.StatusUnprocessableEntity},
+					Message:  "Validation Failed: Hook already exists on this repository",
+				}
+			}
+			return &github.Hook{ID: github.Ptr(int64(3003)), Active: github.Ptr(true)}, nil
+		},
+	}
+
+	s := NewServer(
+		ps,
+		WithGitHubClient(mockClient),
+		WithIngressURL(ingressURL),
+		WithWebhookSecret(secret),
+	)
+
+	const n = 5
+	errChan := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			req := &pb.RegistrationRequest{
+				RepoFullName:   "brotherlogic/ghwebhook",
+				ServiceAddress: fmt.Sprintf("127.0.0.1:%d", 50050+idx),
+			}
+			resp, err := s.Register(context.Background(), req)
+			if err != nil {
+				errChan <- fmt.Errorf("rpc error: %w", err)
+				return
+			}
+			if !resp.Success {
+				errChan <- fmt.Errorf("register failed: %s", resp.Message)
+				return
+			}
+			errChan <- nil
+		}(i)
+	}
+
+	for i := 0; i < n; i++ {
+		if err := <-errChan; err != nil {
+			t.Errorf("Concurrent registration failed: %v", err)
+		}
+	}
+}
+
+func TestRegister_FailsAndSkipsPStore_OnGitHubError(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	ingressURL := "https://ingress.example.com/webhook"
+	secret := "secret-err"
+
+	t.Run("ListHooks error", func(t *testing.T) {
+		mockClient := &mockGitHubHookClient{
+			listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+				return nil, errors.New("network failure listing hooks")
+			},
+		}
+
+		s := NewServer(
+			ps,
+			WithGitHubClient(mockClient),
+			WithIngressURL(ingressURL),
+			WithWebhookSecret(secret),
+		)
+
+		req := &pb.RegistrationRequest{
+			RepoFullName:   "brotherlogic/ghwebhook",
+			ServiceAddress: "127.0.0.1:51111",
+		}
+
+		resp, err := s.Register(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Register returned unexpected RPC error: %v", err)
+		}
+		if resp.Success {
+			t.Errorf("Expected Register to fail on ListHooks error, but got success")
+		}
+
+		key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
+		readResp, err := ps.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+		if err == nil && readResp.Value != nil && len(readResp.Value.Value) > 0 {
+			t.Errorf("Expected pstore write to be skipped on GitHub error, but found key")
+		}
+	})
+
+	t.Run("CreateHook error", func(t *testing.T) {
+		mockClient := &mockGitHubHookClient{
+			listHooksFunc: func(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+				return []*github.Hook{}, nil
+			},
+			createHookFunc: func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+				return nil, errors.New("github 500 internal server error")
+			},
+		}
+
+		s := NewServer(
+			ps,
+			WithGitHubClient(mockClient),
+			WithIngressURL(ingressURL),
+			WithWebhookSecret(secret),
+		)
+
+		req := &pb.RegistrationRequest{
+			RepoFullName:   "brotherlogic/ghwebhook",
+			ServiceAddress: "127.0.0.1:51112",
+		}
+
+		resp, err := s.Register(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Register returned unexpected RPC error: %v", err)
+		}
+		if resp.Success {
+			t.Errorf("Expected Register to fail on CreateHook error, but got success")
+		}
+
+		key := fmt.Sprintf("ghwebhook/reg/%s/%s", req.RepoFullName, req.ServiceAddress)
+		readResp, err := ps.Read(context.Background(), &pstore_pb.ReadRequest{Key: key})
+		if err == nil && readResp.Value != nil && len(readResp.Value.Value) > 0 {
+			t.Errorf("Expected pstore write to be skipped on CreateHook error, but found key")
+		}
+	})
+}
+
+func TestRegister_FailsFast_WhenConfigMissing(t *testing.T) {
+	ps := pstore_client.GetTestClient()
+	mockClient := &mockGitHubHookClient{}
+	ingressURL := "https://ingress.example.com/webhook"
+	secret := "secret-test"
+
+	testCases := []struct {
+		name       string
+		client     GitHubHookClient
+		ingress    string
+		secret     string
+		repo       string
+		service    string
+		wantMsgSub string
+	}{
+		{
+			name:       "nil client",
+			client:     nil,
+			ingress:    ingressURL,
+			secret:     secret,
+			repo:       "brotherlogic/ghwebhook",
+			service:    "127.0.0.1:50051",
+			wantMsgSub: "configured",
+		},
+		{
+			name:       "empty ingress URL",
+			client:     mockClient,
+			ingress:    "",
+			secret:     secret,
+			repo:       "brotherlogic/ghwebhook",
+			service:    "127.0.0.1:50051",
+			wantMsgSub: "configured",
+		},
+		{
+			name:       "empty secret",
+			client:     mockClient,
+			ingress:    ingressURL,
+			secret:     "",
+			repo:       "brotherlogic/ghwebhook",
+			service:    "127.0.0.1:50051",
+			wantMsgSub: "configured",
+		},
+		{
+			name:       "empty repo",
+			client:     mockClient,
+			ingress:    ingressURL,
+			secret:     secret,
+			repo:       "",
+			service:    "127.0.0.1:50051",
+			wantMsgSub: "provided",
+		},
+		{
+			name:       "empty service address",
+			client:     mockClient,
+			ingress:    ingressURL,
+			secret:     secret,
+			repo:       "brotherlogic/ghwebhook",
+			service:    "",
+			wantMsgSub: "provided",
+		},
+		{
+			name:       "invalid repo format without slash",
+			client:     mockClient,
+			ingress:    ingressURL,
+			secret:     secret,
+			repo:       "invalidrepo",
+			service:    "127.0.0.1:50051",
+			wantMsgSub: "invalid",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(
+				ps,
+				WithGitHubClient(tc.client),
+				WithIngressURL(tc.ingress),
+				WithWebhookSecret(tc.secret),
+			)
+
+			resp, err := s.Register(context.Background(), &pb.RegistrationRequest{
+				RepoFullName:   tc.repo,
+				ServiceAddress: tc.service,
+			})
+			if err != nil {
+				t.Fatalf("Unexpected RPC error: %v", err)
+			}
+			if resp.Success {
+				t.Errorf("Expected Register to fail fast, but got Success=true")
+			}
+			if !strings.Contains(strings.ToLower(resp.Message), strings.ToLower(tc.wantMsgSub)) {
+				t.Errorf("Expected error message containing %q, got %q", tc.wantMsgSub, resp.Message)
+			}
+		})
 	}
 }

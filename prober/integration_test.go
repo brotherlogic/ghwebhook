@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type testIntegrationHookClient struct {
+	mu    sync.Mutex
+	hooks []*github.Hook
+}
+
+func (t *testIntegrationHookClient) ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.hooks, nil
+}
+
+func (t *testIntegrationHookClient) DeleteHook(ctx context.Context, owner, repo string, hookID int64) error {
+	return nil
+}
+
+func (t *testIntegrationHookClient) CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	created := *hook
+	created.ID = github.Ptr(int64(12345))
+	t.hooks = append(t.hooks, &created)
+	return &created, nil
+}
+
 // setupGHWebhookServer starts an in-memory ghwebhook gRPC RegistrationService
 // and HTTP webhook ingress server for integration tests.
 func setupGHWebhookServer(t *testing.T, secret string) (*server.Server, string, *httptest.Server, func()) {
@@ -35,7 +60,13 @@ func setupGHWebhookServer(t *testing.T, secret string) (*server.Server, string, 
 	os.Setenv("GH_WEBHOOK_SECRET", secret)
 
 	pstore := pstore_client.GetTestClient()
-	srv := server.NewServer(pstore)
+	mockGH := &testIntegrationHookClient{}
+	srv := server.NewServer(
+		pstore,
+		server.WithGitHubClient(mockGH),
+		server.WithIngressURL("https://example.com/webhook"),
+		server.WithWebhookSecret(secret),
+	)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
