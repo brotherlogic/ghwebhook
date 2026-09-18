@@ -381,6 +381,7 @@ func TestUnregister_MultiServiceRetention(t *testing.T) {
 type mockGitHubHookClient struct {
 	listHooksFunc  func(ctx context.Context, owner, repo string) ([]*github.Hook, error)
 	deleteHookFunc func(ctx context.Context, owner, repo string, hookID int64) error
+	createHookFunc func(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error)
 }
 
 func (m *mockGitHubHookClient) ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
@@ -395,6 +396,13 @@ func (m *mockGitHubHookClient) DeleteHook(ctx context.Context, owner, repo strin
 		return m.deleteHookFunc(ctx, owner, repo, hookID)
 	}
 	return nil
+}
+
+func (m *mockGitHubHookClient) CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+	if m.createHookFunc != nil {
+		return m.createHookFunc(ctx, owner, repo, hook)
+	}
+	return nil, nil
 }
 
 func TestUnregister_LastServiceGitHubDeletion(t *testing.T) {
