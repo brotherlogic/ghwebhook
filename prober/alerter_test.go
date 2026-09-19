@@ -133,6 +133,7 @@ func TestHandleHardFailure_NoOpenIssue_CreatesIssue(t *testing.T) {
 	labels := capturedReq.GetLabels()
 	hasBug := false
 	hasProber := false
+	hasAnalysis := false
 	for _, l := range labels {
 		if l == prober.DefaultAlertLabelBug {
 			hasBug = true
@@ -140,9 +141,23 @@ func TestHandleHardFailure_NoOpenIssue_CreatesIssue(t *testing.T) {
 		if l == prober.DefaultAlertLabelProber {
 			hasProber = true
 		}
+		if l == prober.DefaultAlertLabelAnalysis {
+			hasAnalysis = true
+		}
 	}
-	if !hasBug || !hasProber {
-		t.Errorf("expected labels [%s, %s], got %v", prober.DefaultAlertLabelBug, prober.DefaultAlertLabelProber, labels)
+	if !hasBug || !hasProber || !hasAnalysis {
+		t.Errorf("expected labels [%s, %s, %s], got %v", prober.DefaultAlertLabelBug, prober.DefaultAlertLabelProber, prober.DefaultAlertLabelAnalysis, labels)
+	}
+
+	assignees := capturedReq.GetAssignees()
+	hasAssignee := false
+	for _, a := range assignees {
+		if a == prober.DefaultAlertAssignee {
+			hasAssignee = true
+		}
+	}
+	if !hasAssignee {
+		t.Errorf("expected assignee %q in %v", prober.DefaultAlertAssignee, assignees)
 	}
 
 	body := capturedReq.GetBody()
@@ -586,3 +601,68 @@ func TestHandleHardFailure_WithDiagnostics_IncludesEnrichedReport(t *testing.T) 
 		t.Errorf("expected captured body to contain delivery table GUID, got:\n%s", capturedBody)
 	}
 }
+
+func TestHandleHardFailure_AssigneeAndAnalysisLabel(t *testing.T) {
+	ctx := context.Background()
+	newNum := 101
+	newURL := "https://github.com/brotherlogic/ghwebhook/issues/101"
+	stateOpen := "open"
+
+	var capturedReq *github.IssueRequest
+	mockClient := &prober.MockGitHubIssueClient{
+		SearchIssuesFunc: func(ctx context.Context, owner, repo, query string) ([]*github.Issue, error) {
+			return []*github.Issue{}, nil
+		},
+		CreateIssueFunc: func(ctx context.Context, owner, repo string, req *github.IssueRequest) (*github.Issue, error) {
+			capturedReq = req
+			return &github.Issue{
+				Number:  &newNum,
+				HTMLURL: &newURL,
+				State:   &stateOpen,
+			}, nil
+		},
+	}
+
+	res := prober.Result{
+		Status:      prober.StatusHardFailure,
+		Duration:    10 * time.Second,
+		IssueNumber: 100,
+		Action:      "opened",
+		Message:     "hard failure",
+		Err:         errors.New("hard failure"),
+	}
+
+	_, err := prober.HandleHardFailure(ctx, mockClient, "brotherlogic/ghwebhook", res)
+	if err != nil {
+		t.Fatalf("HandleHardFailure failed: %v", err)
+	}
+
+	if capturedReq == nil {
+		t.Fatalf("expected CreateIssue to be called with non-nil request")
+	}
+
+	labels := capturedReq.GetLabels()
+	hasAnalysis := false
+	for _, l := range labels {
+		if l == prober.DefaultAlertLabelAnalysis {
+			hasAnalysis = true
+			break
+		}
+	}
+	if !hasAnalysis {
+		t.Errorf("expected label %q in %v", prober.DefaultAlertLabelAnalysis, labels)
+	}
+
+	assignees := capturedReq.GetAssignees()
+	hasAssignee := false
+	for _, a := range assignees {
+		if a == prober.DefaultAlertAssignee {
+			hasAssignee = true
+			break
+		}
+	}
+	if !hasAssignee {
+		t.Errorf("expected assignee %q in %v", prober.DefaultAlertAssignee, assignees)
+	}
+}
+
