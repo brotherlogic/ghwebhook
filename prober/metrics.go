@@ -28,7 +28,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "ghwebhook_prober_duration_seconds",
 			Help:    "Duration of prober execution runs in seconds.",
-			Buckets: []float64{0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0},
+			Buckets: []float64{0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 45.0, 60.0, 90.0, 120.0},
 		},
 		[]string{"repo"},
 	)

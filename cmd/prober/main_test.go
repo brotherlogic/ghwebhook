@@ -111,6 +111,9 @@ func TestParseConfig_Defaults(t *testing.T) {
 	if cfg.Timeout != prober.DefaultTimeout {
 		t.Errorf("expected Timeout %v, got %v", prober.DefaultTimeout, cfg.Timeout)
 	}
+	if cfg.Timeout != 120*time.Second {
+		t.Errorf("expected Timeout 120s (2m0s), got %v", cfg.Timeout)
+	}
 	if cfg.GitHubToken != "default-test-token" {
 		t.Errorf("expected GitHubToken default-test-token, got %q", cfg.GitHubToken)
 	}

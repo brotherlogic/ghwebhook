@@ -90,7 +90,7 @@ const (
 	DefaultGHWebhookAddr = "localhost:50051"
 	DefaultListenAddr    = ":50052"
 	DefaultServiceAddr   = "127.0.0.1:50052"
-	DefaultTimeout       = 60 * time.Second
+	DefaultTimeout       = 120 * time.Second
 )
 
 // Prober manages the end-to-end validation lifecycle.
