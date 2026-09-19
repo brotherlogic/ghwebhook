@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,15 +28,61 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type testIntegrationHookClient struct {
+	mu    sync.Mutex
+	hooks []*github.Hook
+}
+
+func (t *testIntegrationHookClient) ListHooks(ctx context.Context, owner, repo string) ([]*github.Hook, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.hooks, nil
+}
+
+func (t *testIntegrationHookClient) DeleteHook(ctx context.Context, owner, repo string, hookID int64) error {
+	return nil
+}
+
+func (t *testIntegrationHookClient) CreateHook(ctx context.Context, owner, repo string, hook *github.Hook) (*github.Hook, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	created := *hook
+	created.ID = github.Ptr(int64(12345))
+	t.hooks = append(t.hooks, &created)
+	return &created, nil
+}
+
+type testIntegrationProberHookClient struct {
+	serverGH *testIntegrationHookClient
+}
+
+func (c *testIntegrationProberHookClient) ListHooks(ctx context.Context, owner, repo string, opts *github.ListOptions) ([]*github.Hook, error) {
+	return c.serverGH.ListHooks(ctx, owner, repo)
+}
+
+func (c *testIntegrationProberHookClient) ListHookDeliveries(ctx context.Context, owner, repo string, hookID int64, opts *github.ListCursorOptions) ([]*github.HookDelivery, error) {
+	return nil, nil
+}
+
+func (t *testIntegrationHookClient) ProberHookClient() prober.GitHubHookClient {
+	return &testIntegrationProberHookClient{serverGH: t}
+}
+
 // setupGHWebhookServer starts an in-memory ghwebhook gRPC RegistrationService
 // and HTTP webhook ingress server for integration tests.
-func setupGHWebhookServer(t *testing.T, secret string) (*server.Server, string, *httptest.Server, func()) {
+func setupGHWebhookServer(t *testing.T, secret string) (*server.Server, string, *httptest.Server, *testIntegrationHookClient, func()) {
 	t.Helper()
 
 	os.Setenv("GH_WEBHOOK_SECRET", secret)
 
 	pstore := pstore_client.GetTestClient()
-	srv := server.NewServer(pstore)
+	mockGH := &testIntegrationHookClient{}
+	srv := server.NewServer(
+		pstore,
+		server.WithGitHubClient(mockGH),
+		server.WithIngressURL("https://example.com/webhook"),
+		server.WithWebhookSecret(secret),
+	)
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -58,7 +105,7 @@ func setupGHWebhookServer(t *testing.T, secret string) (*server.Server, string, 
 		os.Unsetenv("GH_WEBHOOK_SECRET")
 	}
 
-	return srv, lis.Addr().String(), httpServer, cleanup
+	return srv, lis.Addr().String(), httpServer, mockGH, cleanup
 }
 
 // sendSignedWebhook helper computes HMAC signature and POSTs to ghwebhook HTTP ingress.
@@ -101,7 +148,7 @@ func sendSignedWebhook(t *testing.T, httpURL string, secret string, eventType st
 // 5. Prober unregisters and subsequent webhooks are no longer forwarded.
 func TestIntegration_EndToEndFlow_Register_WebhookDelivery_Deregister(t *testing.T) {
 	secret := "test-secret-e2e-12345"
-	_, grpcAddr, httpServer, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, httpServer, _, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -239,7 +286,7 @@ func TestIntegration_EndToEndFlow_Register_WebhookDelivery_Deregister(t *testing
 // and automatic deferred cleanup.
 func TestIntegration_ProberRun_FullLifecycle(t *testing.T) {
 	secret := "test-secret-full-run-12345"
-	_, grpcAddr, httpServer, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, httpServer, mockGH, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -303,6 +350,7 @@ func TestIntegration_ProberRun_FullLifecycle(t *testing.T) {
 		prober.WithRepo("brotherlogic/ghwebhook"),
 		prober.WithTargetTitle(issueTitle),
 		prober.WithGitHubClient(mockGHClient),
+		prober.WithHookClient(mockGH.ProberHookClient()),
 		prober.WithTimeout(3*time.Second),
 	)
 
@@ -332,7 +380,7 @@ func TestIntegration_ProberRun_FullLifecycle(t *testing.T) {
 // is in closed state, validating that it reopens the issue and matches the 'reopened' webhook.
 func TestIntegration_ProberRun_ReopenedIssueFlow(t *testing.T) {
 	secret := "test-secret-reopen-12345"
-	_, grpcAddr, httpServer, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, httpServer, mockGH, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -392,6 +440,7 @@ func TestIntegration_ProberRun_ReopenedIssueFlow(t *testing.T) {
 		prober.WithRepo("brotherlogic/ghwebhook"),
 		prober.WithTargetTitle(existingTitle),
 		prober.WithGitHubClient(mockGHClient),
+		prober.WithHookClient(mockGH.ProberHookClient()),
 		prober.WithTimeout(3*time.Second),
 	)
 
@@ -418,7 +467,7 @@ func TestIntegration_ProberRun_ReopenedIssueFlow(t *testing.T) {
 // arrives, ensuring it returns StatusHardFailure and performs clean deregistration.
 func TestIntegration_ProberRun_TimeoutBehavior(t *testing.T) {
 	secret := "test-secret-timeout-12345"
-	_, grpcAddr, _, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, _, mockGH, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -455,6 +504,7 @@ func TestIntegration_ProberRun_TimeoutBehavior(t *testing.T) {
 		prober.WithRepo("brotherlogic/ghwebhook"),
 		prober.WithTargetTitle(title),
 		prober.WithGitHubClient(mockGHClient),
+		prober.WithHookClient(mockGH.ProberHookClient()),
 		prober.WithTimeout(100*time.Millisecond),
 	)
 
@@ -478,7 +528,7 @@ func TestIntegration_ProberRun_TimeoutBehavior(t *testing.T) {
 // or unregistering unknown services behaves gracefully without errors.
 func TestIntegration_DeregistrationIdempotency(t *testing.T) {
 	secret := "test-secret-idempotency-12345"
-	_, grpcAddr, _, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, _, _, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -530,7 +580,7 @@ func TestIntegration_DeregistrationIdempotency(t *testing.T) {
 // is in open state, verifying that it closes the issue and matches the 'closed' webhook.
 func TestIntegration_ProberRun_ClosedIssueFlow(t *testing.T) {
 	secret := "test-secret-closed-12345"
-	_, grpcAddr, httpServer, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, httpServer, mockGH, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -586,6 +636,7 @@ func TestIntegration_ProberRun_ClosedIssueFlow(t *testing.T) {
 		prober.WithRepo("brotherlogic/ghwebhook"),
 		prober.WithTargetTitle(existingTitle),
 		prober.WithGitHubClient(mockGHClient),
+		prober.WithHookClient(mockGH.ProberHookClient()),
 		prober.WithTimeout(3*time.Second),
 	)
 
@@ -609,7 +660,7 @@ func TestIntegration_ProberRun_ClosedIssueFlow(t *testing.T) {
 // webhook events only to probers registered for the matching repository.
 func TestIntegration_MultipleProbers_SelectiveRouting(t *testing.T) {
 	secret := "test-secret-multi-12345"
-	_, grpcAddr, httpServer, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, httpServer, _, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -700,7 +751,7 @@ func TestIntegration_MultipleProbers_SelectiveRouting(t *testing.T) {
 // upstream GitHub API failures (such as rate limits).
 func TestIntegration_ProberRun_SoftFailure_GitHubAPIError(t *testing.T) {
 	secret := "test-secret-softfail-12345"
-	_, grpcAddr, _, cleanup := setupGHWebhookServer(t, secret)
+	_, grpcAddr, _, mockGH, cleanup := setupGHWebhookServer(t, secret)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -719,6 +770,7 @@ func TestIntegration_ProberRun_SoftFailure_GitHubAPIError(t *testing.T) {
 		prober.WithRepo("brotherlogic/ghwebhook"),
 		prober.WithTargetTitle("PROBER TEST"),
 		prober.WithGitHubClient(mockGHClient),
+		prober.WithHookClient(mockGH.ProberHookClient()),
 		prober.WithTimeout(1*time.Second),
 	)
 

@@ -67,7 +67,7 @@ func TestReliableDelivery_ThreeStrikesRemoval(t *testing.T) {
 
 	// 2. Setup Server
 	ps := pstore_client.GetTestClient()
-	server := NewServer(ps)
+	server := newTestServer(ps)
 	server.backoffs = []time.Duration{1 * time.Millisecond} // 1 attempt total
 
 	// 3. Register service

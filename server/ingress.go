@@ -66,8 +66,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	eventType := r.Header.Get("X-GitHub-Event")
 	metricEventType := eventType
-	if eventType != "pull_request" && eventType != "issue" {
-		log.Printf("Received event type other than pull_request or issue: %q", eventType)
+	if eventType != "pull_request" && eventType != "issue" && eventType != "issues" {
+		log.Printf("Received event type other than pull_request, issue, or issues: %q", eventType)
 		metricEventType = "unknown"
 	}
 
@@ -111,7 +111,7 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 			key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, address)
 
 			outgoingMetricEventType := event.Header.EventType
-			if outgoingMetricEventType != "pull_request" && outgoingMetricEventType != "issue" {
+			if outgoingMetricEventType != "pull_request" && outgoingMetricEventType != "issue" && outgoingMetricEventType != "issues" {
 				outgoingMetricEventType = "unknown"
 			}
 
@@ -189,7 +189,7 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 				},
 			}
 		}
-	case "issue":
+	case "issue", "issues":
 		if gh.Issue != nil {
 			event.Payload = &pb.WebhookEvent_Issue{
 				Issue: &pb.IssueEvent{

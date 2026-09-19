@@ -287,6 +287,117 @@ func (p *Prober) Run(ctx context.Context) (Result, error) {
 		}, err
 	}
 
+	// Immediately following successful regClient.Register:
+	// Verify that an active repository webhook targeting ingressURL exists.
+	if ctx.Err() != nil {
+		return Result{
+			Status:   StatusHardFailure,
+			Duration: time.Since(startTime),
+			Message:  "context cancelled before webhook validation",
+			Err:      ctx.Err(),
+		}, ctx.Err()
+	}
+
+	p.mu.Lock()
+	if p.hookClient == nil {
+		p.hookClient = NewDefaultGitHubHookClient("")
+	}
+	hookClient := p.hookClient
+	ingressURL := p.ingressURL
+	p.mu.Unlock()
+
+	hooks, err := hookClient.ListHooks(ctx, owner, repo, nil)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			return Result{
+				Status:   StatusHardFailure,
+				Duration: time.Since(startTime),
+				Message:  "context cancelled during webhook inspection",
+				Err:      ctx.Err(),
+			}, ctx.Err()
+		}
+
+		var errResp *github.ErrorResponse
+		if (errors.As(err, &errResp) && errResp.Response != nil && (errResp.Response.StatusCode == http.StatusForbidden || errResp.Response.StatusCode == http.StatusNotFound)) ||
+			strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "404") {
+			detail := "insufficient token permissions to inspect repository webhooks (admin:repo_hook required)"
+			return Result{
+				Status:   StatusHardFailure,
+				Duration: time.Since(startTime),
+				Message:  detail,
+				Err:      err,
+				Diagnostics: &InspectionDiagnostics{
+					RootCause:       RootCauseInspectionUnavailable,
+					RootCauseDetail: detail,
+					ErrorMessage:    err.Error(),
+				},
+			}, err
+		}
+
+		return Result{
+			Status:   classifyGitHubError(err),
+			Duration: time.Since(startTime),
+			Message:  fmt.Sprintf("failed to list repository webhooks: %v", err),
+			Err:      err,
+			Diagnostics: &InspectionDiagnostics{
+				RootCause:       RootCauseInspectionUnavailable,
+				RootCauseDetail: fmt.Sprintf("failed to list repository webhooks: %v", err),
+				ErrorMessage:    err.Error(),
+			},
+		}, err
+	}
+
+	var hasMatchingActiveWebhook bool
+	for _, hook := range hooks {
+		if hook == nil || !hook.GetActive() {
+			continue
+		}
+
+		listensToIssues := false
+		for _, ev := range hook.Events {
+			if ev == "issues" || ev == "*" {
+				listensToIssues = true
+				break
+			}
+		}
+		if !listensToIssues {
+			continue
+		}
+
+		if ingressURL != "" {
+			var hookURL string
+			if hook.Config != nil {
+				if hook.Config.URL != nil {
+					hookURL = *hook.Config.URL
+				} else {
+					hookURL = hook.Config.GetURL()
+				}
+			}
+			if hookURL != ingressURL {
+				continue
+			}
+		}
+
+		hasMatchingActiveWebhook = true
+		break
+	}
+
+	if !hasMatchingActiveWebhook {
+		detail := "no active webhook configured for ghwebhook found on repository following registration"
+		abortErr := errors.New(detail)
+		return Result{
+			Status:   StatusHardFailure,
+			Duration: time.Since(startTime),
+			Message:  detail,
+			Err:      abortErr,
+			Diagnostics: &InspectionDiagnostics{
+				RootCause:        RootCauseWebhookMissing,
+				RootCauseDetail:  detail,
+				ActiveHooksCount: 0,
+			},
+		}, nil
+	}
+
 	// Ensure GitHubIssueClient is initialized
 	if p.ghClient == nil {
 		p.ghClient = NewDefaultGitHubIssueClient("")
