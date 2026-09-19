@@ -27,15 +27,17 @@ type githubPayload struct {
 }
 
 type githubPR struct {
-	Title string     `json:"title"`
-	Body  string     `json:"body"`
-	User  githubUser `json:"user"`
+	Number int32      `json:"number"`
+	Title  string     `json:"title"`
+	Body   string     `json:"body"`
+	User   githubUser `json:"user"`
 }
 
 type githubIssue struct {
-	Title string     `json:"title"`
-	Body  string     `json:"body"`
-	User  githubUser `json:"user"`
+	Number int32      `json:"number"`
+	Title  string     `json:"title"`
+	Body   string     `json:"body"`
+	User   githubUser `json:"user"`
 }
 
 type githubUser struct {
@@ -178,10 +180,14 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 	switch eventType {
 	case "pull_request":
 		if gh.PullRequest != nil {
+			number := gh.PullRequest.Number
+			if number == 0 {
+				number = gh.Number
+			}
 			event.Payload = &pb.WebhookEvent_PullRequest{
 				PullRequest: &pb.PullRequestEvent{
 					Action:     gh.Action,
-					Number:     gh.Number,
+					Number:     number,
 					Title:      gh.PullRequest.Title,
 					Body:       gh.PullRequest.Body,
 					User:       &pb.User{Login: gh.PullRequest.User.Login},
@@ -191,10 +197,14 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 		}
 	case "issue", "issues":
 		if gh.Issue != nil {
+			number := gh.Issue.Number
+			if number == 0 {
+				number = gh.Number
+			}
 			event.Payload = &pb.WebhookEvent_Issue{
 				Issue: &pb.IssueEvent{
 					Action:     gh.Action,
-					Number:     gh.Number,
+					Number:     number,
 					Title:      gh.Issue.Title,
 					Body:       gh.Issue.Body,
 					User:       &pb.User{Login: gh.Issue.User.Login},
