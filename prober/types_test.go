@@ -131,8 +131,14 @@ func TestNewProber_Defaults(t *testing.T) {
 	if p.serviceAddr != DefaultServiceAddr {
 		t.Errorf("p.serviceAddr = %q, want %q", p.serviceAddr, DefaultServiceAddr)
 	}
+	if DefaultTimeout != 120*time.Second {
+		t.Errorf("DefaultTimeout = %v, want 120s (2m0s)", DefaultTimeout)
+	}
 	if p.timeout != DefaultTimeout {
 		t.Errorf("p.timeout = %v, want %v", p.timeout, DefaultTimeout)
+	}
+	if p.timeout != 120*time.Second {
+		t.Errorf("p.timeout = %v, want 120s (2m0s)", p.timeout)
 	}
 	if p.eventCh == nil {
 		t.Error("p.eventCh is nil, expected initialized channel")
