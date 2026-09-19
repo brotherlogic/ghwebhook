@@ -11,9 +11,11 @@ import (
 
 // Alert constants for prober failure reporting.
 const (
-	DefaultAlertTitle       = "[PROBER FAILURE] Webhook delivery or validation failed"
-	DefaultAlertLabelBug    = "bug"
-	DefaultAlertLabelProber = "prober-failure"
+	DefaultAlertTitle         = "[PROBER FAILURE] Webhook delivery or validation failed"
+	DefaultAlertLabelBug      = "bug"
+	DefaultAlertLabelProber   = "prober-failure"
+	DefaultAlertLabelAnalysis = "seraphine-bug-analysis"
+	DefaultAlertAssignee      = "brotherlogic-automation"
 )
 
 // AlertResult represents the outcome of the failure alerting process.
@@ -56,11 +58,13 @@ func HandleHardFailure(ctx context.Context, client GitHubIssueClient, repoFullNa
 	body := buildDiagnosticReport(repoFullName, res)
 
 	title := DefaultAlertTitle
-	labels := []string{DefaultAlertLabelBug, DefaultAlertLabelProber}
+	labels := []string{DefaultAlertLabelBug, DefaultAlertLabelProber, DefaultAlertLabelAnalysis}
+	assignees := []string{DefaultAlertAssignee}
 	req := &github.IssueRequest{
-		Title:  &title,
-		Body:   &body,
-		Labels: &labels,
+		Title:     &title,
+		Body:      &body,
+		Labels:    &labels,
+		Assignees: &assignees,
 	}
 
 	created, err := client.CreateIssue(ctx, owner, repo, req)
