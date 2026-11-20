@@ -19,25 +19,59 @@ import (
 )
 
 type githubPayload struct {
-	Action      string       `json:"action"`
-	Number      int32        `json:"number"`
-	PullRequest *githubPR    `json:"pull_request"`
-	Issue       *githubIssue `json:"issue"`
-	Repository  githubRepo   `json:"repository"`
+	Action      string            `json:"action"`
+	Number      int32             `json:"number"`
+	Ref         string            `json:"ref"`
+	Before      string            `json:"before"`
+	After       string            `json:"after"`
+	Sender      githubUser        `json:"sender"`
+	PullRequest *githubPR         `json:"pull_request"`
+	Issue       *githubIssue      `json:"issue"`
+	Review      *githubReview     `json:"review"`
+	CheckSuite  *githubCheckSuite `json:"check_suite"`
+	Repository  githubRepo        `json:"repository"`
 }
 
 type githubPR struct {
-	Number int32      `json:"number"`
-	Title  string     `json:"title"`
-	Body   string     `json:"body"`
-	User   githubUser `json:"user"`
+	Number int32        `json:"number"`
+	Title  string       `json:"title"`
+	Body   string       `json:"body"`
+	State  string       `json:"state"`
+	Merged bool         `json:"merged"`
+	Head   githubBranch `json:"head"`
+	Base   githubBranch `json:"base"`
+	User   githubUser   `json:"user"`
+}
+
+type githubBranch struct {
+	Ref string `json:"ref"`
+	SHA string `json:"sha"`
 }
 
 type githubIssue struct {
-	Number int32      `json:"number"`
-	Title  string     `json:"title"`
-	Body   string     `json:"body"`
-	User   githubUser `json:"user"`
+	Number int32         `json:"number"`
+	Title  string        `json:"title"`
+	Body   string        `json:"body"`
+	State  string        `json:"state"`
+	Labels []githubLabel `json:"labels"`
+	User   githubUser    `json:"user"`
+}
+
+type githubLabel struct {
+	Name string `json:"name"`
+}
+
+type githubReview struct {
+	State    string     `json:"state"`
+	CommitID string     `json:"commit_id"`
+	User     githubUser `json:"user"`
+}
+
+type githubCheckSuite struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HeadBranch string `json:"head_branch"`
+	HeadSHA    string `json:"head_sha"`
 }
 
 type githubUser struct {
@@ -68,8 +102,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	eventType := r.Header.Get("X-GitHub-Event")
 	metricEventType := eventType
-	if eventType != "pull_request" && eventType != "issue" && eventType != "issues" {
-		log.Printf("Received event type other than pull_request, issue, or issues: %q", eventType)
+	if !isKnownEventType(eventType) {
+		log.Printf("Received unsupported event type: %q", eventType)
 		metricEventType = "unknown"
 	}
 
@@ -113,7 +147,7 @@ func (s *Server) routeEvent(ctx context.Context, event *pb.WebhookEvent, repo st
 			key := fmt.Sprintf("ghwebhook/reg/%s/%s", repo, address)
 
 			outgoingMetricEventType := event.Header.EventType
-			if outgoingMetricEventType != "pull_request" && outgoingMetricEventType != "issue" && outgoingMetricEventType != "issues" {
+			if !isKnownEventType(outgoingMetricEventType) {
 				outgoingMetricEventType = "unknown"
 			}
 
@@ -169,6 +203,15 @@ func (s *Server) validateSignature(payload []byte, signature string) bool {
 	return hmac.Equal([]byte(signature), []byte(expectedSignature))
 }
 
+func isKnownEventType(eventType string) bool {
+	switch eventType {
+	case "pull_request", "issue", "issues", "push", "pull_request_review", "check_suite":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent {
 	event := &pb.WebhookEvent{
 		Header: &pb.EventHeader{
@@ -192,6 +235,11 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 					Body:       gh.PullRequest.Body,
 					User:       &pb.User{Login: gh.PullRequest.User.Login},
 					Repository: &pb.Repository{FullName: gh.Repository.FullName},
+					Merged:     gh.PullRequest.Merged,
+					HeadRef:    gh.PullRequest.Head.Ref,
+					HeadSha:    gh.PullRequest.Head.SHA,
+					BaseRef:    gh.PullRequest.Base.Ref,
+					State:      gh.PullRequest.State,
 				},
 			}
 		}
@@ -201,6 +249,12 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 			if number == 0 {
 				number = gh.Number
 			}
+			var labels []string
+			for _, label := range gh.Issue.Labels {
+				if label.Name != "" {
+					labels = append(labels, label.Name)
+				}
+			}
 			event.Payload = &pb.WebhookEvent_Issue{
 				Issue: &pb.IssueEvent{
 					Action:     gh.Action,
@@ -208,6 +262,51 @@ func (s *Server) mapToProto(gh githubPayload, eventType string) *pb.WebhookEvent
 					Title:      gh.Issue.Title,
 					Body:       gh.Issue.Body,
 					User:       &pb.User{Login: gh.Issue.User.Login},
+					Repository: &pb.Repository{FullName: gh.Repository.FullName},
+					Labels:     labels,
+					State:      gh.Issue.State,
+				},
+			}
+		}
+	case "push":
+		event.Payload = &pb.WebhookEvent_Push{
+			Push: &pb.PushEvent{
+				Ref:        gh.Ref,
+				Before:     gh.Before,
+				After:      gh.After,
+				Sender:     &pb.User{Login: gh.Sender.Login},
+				Repository: &pb.Repository{FullName: gh.Repository.FullName},
+			},
+		}
+	case "pull_request_review":
+		if gh.Review != nil {
+			var prNumber int32
+			if gh.PullRequest != nil {
+				prNumber = gh.PullRequest.Number
+			}
+			if prNumber == 0 {
+				prNumber = gh.Number
+			}
+			event.Payload = &pb.WebhookEvent_PullRequestReview{
+				PullRequestReview: &pb.PullRequestReviewEvent{
+					Action:            gh.Action,
+					State:             gh.Review.State,
+					CommitId:          gh.Review.CommitID,
+					Reviewer:          &pb.User{Login: gh.Review.User.Login},
+					PullRequestNumber: prNumber,
+					Repository:        &pb.Repository{FullName: gh.Repository.FullName},
+				},
+			}
+		}
+	case "check_suite":
+		if gh.CheckSuite != nil {
+			event.Payload = &pb.WebhookEvent_CheckSuite{
+				CheckSuite: &pb.CheckSuiteEvent{
+					Action:     gh.Action,
+					Status:     gh.CheckSuite.Status,
+					Conclusion: gh.CheckSuite.Conclusion,
+					HeadBranch: gh.CheckSuite.HeadBranch,
+					HeadSha:    gh.CheckSuite.HeadSHA,
 					Repository: &pb.Repository{FullName: gh.Repository.FullName},
 				},
 			}
